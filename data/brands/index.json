@@ -1,15 +1,15 @@
 {
-  "note": "Published color-book values. Behr is Behr's own color index, including archived colors. Benjamin Moore is taken from their color pages. Sherwin-Williams is the ColorSnap book, checked against their published hex values. PPG, Valspar, Dunn-Edwards, Farrow & Ball, Kilz, and Dutch Boy are their published books. A newer limited color may not be listed yet.",
+  "note": "Published color-book values. Sherwin-Williams, Behr, Valspar, and Glidden come from each brand's own site, with colors they have since dropped marked archived. Benjamin Moore is taken from their color pages. PPG, Dunn-Edwards, Farrow & Ball, Kilz, and Dutch Boy are their published books. A newer limited color may not be listed yet.",
   "brands": [
     {
       "id": "sherwin-williams",
       "name": "Sherwin-Williams",
-      "count": 1526
+      "count": 1948
     },
     {
       "id": "behr",
       "name": "Behr",
-      "count": 5178
+      "count": 5698
     },
     {
       "id": "benjamin-moore",
@@ -24,7 +24,12 @@
     {
       "id": "valspar",
       "name": "Valspar",
-      "count": 1764
+      "count": 3619
+    },
+    {
+      "id": "glidden",
+      "name": "Glidden",
+      "count": 3185
     },
     {
       "id": "dunn-edwards",

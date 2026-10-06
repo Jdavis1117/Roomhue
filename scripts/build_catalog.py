@@ -1,8 +1,9 @@
 """Build data/brands/*.json from the published color books in data/source.
 
-Behr comes from Behr's own color index. Benjamin Moore comes from their color
-pages. Sherwin-Williams is the ColorSnap book. The other brands are the
-published color-book files. Hex values are copied, not invented.
+scripts/fetch_sources.py refreshes Sherwin-Williams, Behr, Valspar, and Glidden
+from each brand's own site. Colors a brand has dropped from its site are kept
+and marked archived, since stores can still mix them. Hex values are copied,
+not invented.
 """
 
 from __future__ import annotations
@@ -16,9 +17,9 @@ SOURCE = ROOT / "data" / "source"
 OUT = ROOT / "data" / "brands"
 
 NOTE = (
-    "Published color-book values. Behr is Behr's own color index, including archived colors. "
-    "Benjamin Moore is taken from their color pages. Sherwin-Williams is the ColorSnap book, "
-    "checked against their published hex values. PPG, Valspar, Dunn-Edwards, Farrow & Ball, Kilz, "
+    "Published color-book values. Sherwin-Williams, Behr, Valspar, and Glidden "
+    "come from each brand's own site, with colors they have since dropped marked archived. "
+    "Benjamin Moore is taken from their color pages. PPG, Dunn-Edwards, Farrow & Ball, Kilz, "
     "and Dutch Boy are their published books. A newer limited color may not be listed yet."
 )
 
@@ -42,6 +43,12 @@ def clean_hex(value: str) -> str | None:
     return None
 
 
+def title_case(name: str) -> str:
+    """BEHR'S UPPERCASE NAMES -> Behr's Uppercase Names, matching their color pages."""
+    name = clean_name(name).lower()
+    return re.sub(r"(^|[\s/(\"&.])(\w)", lambda match: match.group(1) + match.group(2).upper(), name)
+
+
 def add(colors: list[dict], seen: set[tuple[str, str]], brand: str, code: str, name: str, hex_value: str, archived: bool = False) -> None:
     name = clean_name(name)
     code = clean_name(str(code))
@@ -62,18 +69,31 @@ def main() -> None:
     colors: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
+    for row in json.loads((SOURCE / "sherwin-williams-prism.json").read_text(encoding="utf-8")):
+        if row.get("ignore"):
+            continue
+        add(colors, seen, "sherwin-williams", f"SW{int(row['colorNumber']):04d}", row["name"], row["hex"], bool(row.get("archived")))
     for row in json.loads((SOURCE / "sherwin-williams.json").read_text(encoding="utf-8")):
-        add(colors, seen, "sherwin-williams", f"SW{int(row['label']):04d}", row["name"], row["hex"])
+        add(colors, seen, "sherwin-williams", row["label"], row["name"], row["hex"], True)
 
     for row in json.loads((SOURCE / "behr-colormapper.json").read_text(encoding="utf-8"))["colors"]:
         add(colors, seen, "behr", row["code"], row["name"], row["hex"], bool(row.get("archived")))
+    for row in json.loads((SOURCE / "behr-colornx.json").read_text(encoding="utf-8")):
+        add(colors, seen, "behr", row["id"], title_case(row["name"]), row["rgb"])
 
     for row in json.loads((SOURCE / "benjamin-moore-wesbos.json").read_text(encoding="utf-8")):
         add(colors, seen, "benjamin-moore", row["number"], row["name"], row["hex"])
 
+    for row in json.loads((SOURCE / "valspar-site.json").read_text(encoding="utf-8")):
+        add(colors, seen, "valspar", row["code"], row["name"], row["hex"])
+    for row in json.loads((SOURCE / "valspar.json").read_text(encoding="utf-8")):
+        add(colors, seen, "valspar", row["label"], row["name"], row["hex"], True)
+
+    for row in json.loads((SOURCE / "glidden-site.json").read_text(encoding="utf-8")):
+        add(colors, seen, "glidden", row["code"], row["name"], "rgb({}, {}, {})".format(*row["rgb"]))
+
     for filename, brand in (
         ("ppg.json", "ppg"),
-        ("valspar.json", "valspar"),
         ("dunn-edwards.json", "dunn-edwards"),
         ("farrow-ball.json", "farrow-ball"),
         ("kilz.json", "kilz"),
@@ -88,6 +108,7 @@ def main() -> None:
         "benjamin-moore": "Benjamin Moore",
         "ppg": "PPG",
         "valspar": "Valspar",
+        "glidden": "Glidden",
         "dunn-edwards": "Dunn-Edwards",
         "farrow-ball": "Farrow & Ball",
         "kilz": "Kilz",
