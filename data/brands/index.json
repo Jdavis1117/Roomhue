@@ -1,0 +1,50 @@
+{
+  "note": "Published color-book values. Behr is Behr's own color index, including archived colors. Benjamin Moore is taken from their color pages. Sherwin-Williams is the ColorSnap book, checked against their published hex values. PPG, Valspar, Dunn-Edwards, Farrow & Ball, Kilz, and Dutch Boy are their published books. A newer limited color may not be listed yet.",
+  "brands": [
+    {
+      "id": "sherwin-williams",
+      "name": "Sherwin-Williams",
+      "count": 1526
+    },
+    {
+      "id": "behr",
+      "name": "Behr",
+      "count": 5178
+    },
+    {
+      "id": "benjamin-moore",
+      "name": "Benjamin Moore",
+      "count": 4118
+    },
+    {
+      "id": "ppg",
+      "name": "PPG",
+      "count": 2088
+    },
+    {
+      "id": "valspar",
+      "name": "Valspar",
+      "count": 1764
+    },
+    {
+      "id": "dunn-edwards",
+      "name": "Dunn-Edwards",
+      "count": 1696
+    },
+    {
+      "id": "farrow-ball",
+      "name": "Farrow & Ball",
+      "count": 132
+    },
+    {
+      "id": "kilz",
+      "name": "Kilz",
+      "count": 827
+    },
+    {
+      "id": "dutch-boy",
+      "name": "Dutch Boy",
+      "count": 101
+    }
+  ]
+}

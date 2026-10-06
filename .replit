@@ -1,0 +1,24 @@
+entrypoint = "app/main.py"
+language = "python3"
+modules = ["python-3.11"]
+run = "python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8765"
+
+[nix]
+channel = "stable-24_05"
+
+[gitHubImport]
+requiredFiles = [".replit", "replit.nix"]
+
+[packager]
+language = "python3"
+
+[packager.features]
+guessImports = false
+
+[deployment]
+run = ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8765"]
+deploymentTarget = "cloudrun"
+
+[[ports]]
+localPort = 8765
+externalPort = 80

@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Roomhue</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23f4f0ea'/%3E%3Cpath d='M6 22 V12 L16 6 L26 12 V22 H6Z' fill='none' stroke='%23c45c26' stroke-width='2'/%3E%3Crect x='13' y='16' width='6' height='6' fill='%23c45c26'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <h1>Roomhue</h1>
+          <p>Try paint on a photo of the room.</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button type="button" id="collection-btn" class="text-btn">Collection</button>
+        <button type="button" id="save-btn" class="text-btn" disabled>Save</button>
+        <button type="button" id="sample-btn" class="text-btn">Sample room</button>
+        <button type="button" id="open-btn" class="solid-btn">Open photo</button>
+        <button type="button" id="export-btn" class="solid-btn" disabled>Download</button>
+        <input id="file" type="file" accept="image/*" hidden />
+      </div>
+    </header>
+
+    <main>
+      <section class="stage-wrap" id="drop">
+        <div id="empty" class="empty">
+          <p class="eyebrow">Local preview</p>
+          <h2>Drop a room photo here.</h2>
+          <p class="lede">Walls are marked when the photo opens, and you can place dots to add another wall. The light in the photo stays. Nothing is uploaded.</p>
+          <div class="empty-actions">
+            <button type="button" id="empty-open" class="solid-btn">Browse photos</button>
+            <button type="button" id="empty-sample" class="text-btn">Use the sample room</button>
+            <button type="button" id="empty-collection" class="text-btn">Collection</button>
+          </div>
+        </div>
+
+        <div id="studio" class="studio" hidden>
+          <div id="stage" class="stage">
+            <canvas id="view"></canvas>
+            <div id="brush-cursor" class="brush-cursor" hidden></div>
+          </div>
+          <div class="toolbar">
+            <div class="tool-group" role="toolbar" aria-label="Mask tools">
+              <button type="button" class="tool" data-tool="select" aria-pressed="true">Select</button>
+              <button type="button" class="tool" data-tool="wand" aria-pressed="false">Wand</button>
+              <button type="button" class="tool" data-tool="brush" aria-pressed="false">Brush</button>
+              <button type="button" class="tool" data-tool="eraser" aria-pressed="false">Eraser</button>
+              <button type="button" class="tool" data-tool="dots" aria-pressed="false">Dots</button>
+            </div>
+            <div id="line-actions" class="tool-group" hidden>
+              <button type="button" id="add-wall" class="tool">Add wall</button>
+              <button type="button" id="clear-dots" class="tool">Clear dots</button>
+            </div>
+            <label class="slider-field" id="brush-field">
+              <span>Brush</span>
+              <input id="brush-size" type="range" min="4" max="80" value="24" />
+            </label>
+            <div class="tool-group" id="brush-shapes" role="radiogroup" aria-label="Brush shape">
+              <button type="button" class="tool is-on" data-brush-shape="circle">Circle</button>
+              <button type="button" class="tool" data-brush-shape="square">Square</button>
+              <button type="button" class="tool" data-brush-shape="diamond">Diamond</button>
+            </div>
+            <label class="slider-field" id="tolerance-field">
+              <span>Wand reach</span>
+              <input id="tolerance" type="range" min="6" max="40" value="16" />
+            </label>
+            <label class="slider-field compare-field">
+              <span>Before</span>
+              <input id="compare" type="range" min="0" max="100" value="100" />
+              <span>After</span>
+            </label>
+            <div class="tool-group" role="group" aria-label="Zoom">
+              <button type="button" id="zoom-out" class="tool" title="Zoom out">−</button>
+              <button type="button" id="zoom-reset" class="tool" title="Fit the photo">Fit</button>
+              <button type="button" id="zoom-in" class="tool" title="Zoom in">+</button>
+            </div>
+            <button type="button" id="undo-btn" class="text-btn" disabled>Undo</button>
+            <button type="button" id="redo-btn" class="text-btn" disabled>Redo</button>
+          </div>
+          <p id="status" class="status"></p>
+        </div>
+        <div id="busy" class="busy" hidden>Reading the room…</div>
+      </section>
+
+      <aside class="panel">
+        <div id="panel-resize" class="panel-resize" role="separator" aria-orientation="vertical" aria-label="Drag to resize the color pane" tabindex="0"></div>
+
+        <details class="fold" id="fold-surfaces">
+          <summary>
+            <span>Surfaces</span>
+            <button type="button" id="add-surface" class="text-btn" disabled>Add wall</button>
+          </summary>
+          <div class="fold-body">
+            <ul id="surface-list" class="surface-list"></ul>
+            <p class="hint">Each tint is its own surface. Uncheck one to leave it out. Use Dots to add a wall that was missed.</p>
+          </div>
+        </details>
+
+        <details class="fold" id="fold-finish">
+          <summary><span>Finish</span></summary>
+          <div class="fold-body finish" id="finish">
+            <div class="tool-group sheen-group" role="radiogroup" aria-label="Sheen">
+              <button type="button" class="tool" data-sheen="matte">Matte</button>
+              <button type="button" class="tool" data-sheen="eggshell">Eggshell</button>
+              <button type="button" class="tool" data-sheen="satin">Satin</button>
+              <button type="button" class="tool" data-sheen="semi-gloss">Semi-gloss</button>
+            </div>
+            <label class="slider-field stacked">
+              <span>Coverage <output id="coverage-out">92</output>%</span>
+              <input id="coverage" type="range" min="0" max="100" value="92" />
+            </label>
+            <label class="slider-field stacked">
+              <span>Shade <output id="shade-out">0</output></span>
+              <input id="shade" type="range" min="-15" max="15" value="0" />
+            </label>
+            <button type="button" id="apply-all" class="text-btn" disabled>Apply this color to every wall</button>
+          </div>
+        </details>
+
+        <details class="fold" id="fold-mix">
+          <summary><span>Mix a color</span></summary>
+          <div class="fold-body">
+            <div class="picker">
+              <canvas id="picker-sv" width="320" height="160" aria-label="Color picker"></canvas>
+              <canvas id="picker-hue" width="320" height="18" aria-label="Hue"></canvas>
+            </div>
+            <form id="custom-form" class="custom">
+              <input id="custom-hex" type="text" value="#C45C26" spellcheck="false" aria-label="Hex color" maxlength="7" />
+              <button type="submit" class="text-btn">Use</button>
+            </form>
+            <div id="recent" class="recent" hidden></div>
+          </div>
+        </details>
+
+        <details class="fold brand-fold" id="fold-brands" open>
+          <summary>
+            <span>Brand paints</span>
+            <button type="button" id="clear-color" class="text-btn" disabled>Clear</button>
+          </summary>
+          <div class="brand-body">
+            <input id="search" type="search" placeholder="Search name or code, like Repose Gray or SW7029" autocomplete="off" />
+            <div id="families" class="families"></div>
+            <p id="color-count" class="hint"></p>
+            <div id="swatches" class="swatches" role="listbox" aria-label="Paint colors"></div>
+            <button type="button" id="color-more" class="text-btn" hidden>More colors</button>
+            <details class="note-fold">
+              <summary>About these colors</summary>
+              <p id="color-note" class="hint"></p>
+            </details>
+          </div>
+        </details>
+
+        <details class="fold keys">
+          <summary><span>Shortcuts</span></summary>
+          <ul>
+            <li><kbd>V</kbd> select</li>
+            <li><kbd>W</kbd> wand</li>
+            <li><kbd>B</kbd> brush</li>
+            <li><kbd>E</kbd> eraser</li>
+            <li><kbd>D</kbd> dots</li>
+            <li><kbd>Enter</kbd> add wall</li>
+            <li><kbd>[</kbd> <kbd>]</kbd> brush size</li>
+            <li>Double-click or scroll a spot to zoom there. Space drag moves the photo.</li>
+            <li><kbd>Ctrl</kbd> <kbd>Z</kbd> undo</li>
+            <li><kbd>Ctrl</kbd> <kbd>Y</kbd> redo</li>
+          </ul>
+        </details>
+      </aside>
+    </main>
+  </div>
+  <div id="collection" class="collection" hidden>
+    <div class="collection-card">
+      <div class="section-head">
+        <h2>Collection</h2>
+        <button type="button" id="collection-close" class="text-btn">Close</button>
+      </div>
+      <label class="text-btn collection-upload" for="collection-upload">Upload a saved room</label>
+      <input id="collection-upload" type="file" accept=".json,.png,.jpg" webkitdirectory directory multiple hidden />
+      <ul id="collection-list" class="collection-list"></ul>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
