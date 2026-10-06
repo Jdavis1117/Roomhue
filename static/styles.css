@@ -577,6 +577,25 @@ kbd {
 .collection-item button { margin-right: 4px; }
 .collection-empty { color: var(--muted); margin: 12px 0 0; }
 
+.account { display: flex; align-items: center; margin-left: 4px; }
+.account-google { min-height: 32px; display: flex; align-items: center; }
+.account-user { display: flex; align-items: center; gap: 8px; }
+.account-user img {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--paper-deep);
+}
+.account-user span {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+.signin-card { width: min(420px, 100%); }
+.signin-button { margin-top: 14px; display: flex; justify-content: center; min-height: 44px; }
+
 @media (max-width: 980px) {
   main { grid-template-columns: 1fr; }
   .panel-resize { display: none; }

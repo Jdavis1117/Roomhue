@@ -1,9 +1,10 @@
-"""Local server for Roomhue. Photos stay in this process and are not uploaded anywhere."""
+"""Server for Roomhue. Photos are decoded in this process; saved rooms belong to a Google account."""
 
 from __future__ import annotations
 
 import base64
 import io
+import os
 import threading
 import time
 import uuid
@@ -11,14 +12,16 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
+from starlette.middleware.sessions import SessionMiddleware
 
+from app import auth
 from app.catalog import search as search_colors
-from app.collection import delete_room, import_rooms, list_rooms, load_room, save_room, thumb_file
+from app.collection import delete_room, import_rooms, list_rooms, load_room, save_room, thumb_bytes
 from app.color_math import recolor_rgb
 from app.detect import Surface, detect_surfaces, magic_wand, prepare_image, surfaces_from_lines
 from app.sample_room import make_sample_room
@@ -28,7 +31,17 @@ STATIC = ROOT / "static"
 MAX_BYTES = 25 * 1024 * 1024
 MAX_SESSIONS = 6
 
+auth.load_env_file()
+
 app = FastAPI(title="Roomhue", docs_url=None, redoc_url=None)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=auth.session_secret(),
+    session_cookie="roomhue_session",
+    max_age=auth.SESSION_DAYS * 24 * 60 * 60,
+    same_site="lax",
+    https_only=bool(os.environ.get("REPLIT_DEPLOYMENT")),
+)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 _sessions: dict[str, dict] = {}
@@ -67,6 +80,10 @@ class SavedSurface(BaseModel):
     shade: float = 0
     included: bool = True
     mask_png_base64: str
+
+
+class GoogleSignIn(BaseModel):
+    credential: str = Field(min_length=1, max_length=8192)
 
 
 class SaveRoomRequest(BaseModel):
@@ -187,32 +204,50 @@ def _saved_surfaces(body: SaveRoomRequest) -> list[dict]:
     return [surface.model_dump() for surface in body.surfaces]
 
 
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> dict:
+    return {"client_id": auth.client_id(), "user": auth.current_user(request)}
+
+
+@app.post("/api/auth/google")
+def auth_google(request: Request, body: GoogleSignIn) -> dict:
+    user = auth.verify_google_token(body.credential)
+    request.session["user"] = user
+    return {"user": user}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request) -> dict:
+    request.session.clear()
+    return {"ok": True}
+
+
 @app.get("/api/collection")
-def collection_list() -> list[dict]:
-    return list_rooms()
+def collection_list(user_id: str = Depends(auth.require_user)) -> list[dict]:
+    return list_rooms(user_id)
 
 
 @app.post("/api/collection/import")
-async def collection_import(files: list[UploadFile] = File(...)) -> dict:
+async def collection_import(files: list[UploadFile] = File(...), user_id: str = Depends(auth.require_user)) -> dict:
     uploads = [(item.filename or "", await item.read()) for item in files]
-    return {"rooms": import_rooms(uploads)}
+    return {"rooms": import_rooms(user_id, uploads)}
 
 
 @app.post("/api/sessions/{session_id}/collection")
-def collection_save(session_id: str, body: SaveRoomRequest) -> dict:
+def collection_save(session_id: str, body: SaveRoomRequest, user_id: str = Depends(auth.require_user)) -> dict:
     image = _image(session_id)
-    return save_room(uuid.uuid4().hex[:12], body.name, image, _saved_surfaces(body))
+    return save_room(user_id, uuid.uuid4().hex[:12], body.name, image, _saved_surfaces(body))
 
 
 @app.put("/api/collection/{room_id}")
-def collection_update(room_id: str, body: SaveRoomRequest, session_id: str) -> dict:
+def collection_update(room_id: str, body: SaveRoomRequest, session_id: str, user_id: str = Depends(auth.require_user)) -> dict:
     image = _image(session_id)
-    return save_room(room_id, body.name, image, _saved_surfaces(body))
+    return save_room(user_id, room_id, body.name, image, _saved_surfaces(body))
 
 
 @app.post("/api/collection/{room_id}/open")
-def collection_open(room_id: str) -> dict:
-    image, meta = load_room(room_id)
+def collection_open(room_id: str, user_id: str = Depends(auth.require_user)) -> dict:
+    image, meta = load_room(user_id, room_id)
     session_id = _store(image)
     return {
         "session_id": session_id,
@@ -241,14 +276,14 @@ def collection_open(room_id: str) -> dict:
 
 
 @app.delete("/api/collection/{room_id}")
-def collection_delete(room_id: str) -> dict:
-    delete_room(room_id)
+def collection_delete(room_id: str, user_id: str = Depends(auth.require_user)) -> dict:
+    delete_room(user_id, room_id)
     return {"ok": True}
 
 
 @app.get("/api/collection/{room_id}/thumb")
-def collection_thumb(room_id: str) -> FileResponse:
-    return FileResponse(thumb_file(room_id), media_type="image/jpeg")
+def collection_thumb(room_id: str, user_id: str = Depends(auth.require_user)) -> Response:
+    return Response(thumb_bytes(user_id, room_id), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=60"})
 
 
 @app.post("/api/sessions")

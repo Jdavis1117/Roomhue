@@ -24,6 +24,15 @@
         <button type="button" id="open-btn" class="solid-btn">Open photo</button>
         <button type="button" id="export-btn" class="solid-btn" disabled>Download</button>
         <input id="file" type="file" accept="image/*" hidden />
+        <div id="account" class="account">
+          <div id="account-google" class="account-google"></div>
+          <button type="button" id="account-off" class="text-btn" disabled hidden title="Google sign-in isn't set up on this server yet.">Sign in</button>
+          <div id="account-user" class="account-user" hidden>
+            <img id="account-avatar" alt="" referrerpolicy="no-referrer" />
+            <span id="account-name"></span>
+            <button type="button" id="signout-btn" class="text-btn">Sign out</button>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -32,7 +41,7 @@
         <div id="empty" class="empty">
           <p class="eyebrow">Local preview</p>
           <h2>Drop a room photo here.</h2>
-          <p class="lede">Walls are marked when the photo opens, and you can place dots to add another wall. The light in the photo stays. Nothing is uploaded.</p>
+          <p class="lede">Walls are marked when the photo opens, and you can place dots to add another wall. The light in the photo stays. Sign in with Google to keep rooms in your collection.</p>
           <div class="empty-actions">
             <button type="button" id="empty-open" class="solid-btn">Browse photos</button>
             <button type="button" id="empty-sample" class="text-btn">Use the sample room</button>
@@ -185,7 +194,18 @@
       <ul id="collection-list" class="collection-list"></ul>
     </div>
   </div>
+  <div id="signin" class="collection" hidden>
+    <div class="collection-card signin-card">
+      <div class="section-head">
+        <h2>Sign in to save</h2>
+        <button type="button" id="signin-close" class="text-btn">Close</button>
+      </div>
+      <p class="hint">Your collection is tied to your Google account, so saved rooms are there whenever you sign in.</p>
+      <div id="signin-button" class="signin-button"></div>
+    </div>
+  </div>
   <div id="toast" class="toast" role="status"></div>
+  <script src="https://accounts.google.com/gsi/client" async></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

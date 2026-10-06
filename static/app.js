@@ -27,6 +27,9 @@ const state = {
   val: 0.77,
   pickTarget: null,
   collectionId: null,
+  user: null,
+  clientId: "",
+  afterSignIn: null,
   collectionName: "",
   tolerance: 16,
   compare: 1,
@@ -1424,6 +1427,11 @@ function bind() {
   $("save-btn").addEventListener("click", saveRoom);
   $("collection-btn").addEventListener("click", showCollection);
   $("empty-collection").addEventListener("click", showCollection);
+  $("signout-btn").addEventListener("click", signOut);
+  $("signin-close").addEventListener("click", () => {
+    $("signin").hidden = true;
+    state.afterSignIn = null;
+  });
   $("collection-close").addEventListener("click", () => {
     $("collection").hidden = true;
   });
@@ -1698,7 +1706,117 @@ async function boot() {
   syncLineButtons();
   if ($("fold-mix").open) sizePicker();
   setPickerFromHex("#C45C26");
+  loadAccount();
   await loadColors(true);
+}
+
+async function loadAccount() {
+  try {
+    const response = await fetch("/api/auth/me");
+    if (!response.ok) throw new Error(await readError(response));
+    const body = await response.json();
+    state.clientId = body.client_id || "";
+    state.user = body.user || null;
+  } catch {
+    state.clientId = "";
+  }
+  renderAccount();
+  if (state.clientId) whenGoogleReady(setUpGoogle);
+}
+
+function whenGoogleReady(run) {
+  if (window.google?.accounts?.id) {
+    run();
+    return;
+  }
+  const script = document.querySelector('script[src*="accounts.google.com/gsi/client"]');
+  script?.addEventListener("load", run, { once: true });
+}
+
+function setUpGoogle() {
+  google.accounts.id.initialize({
+    client_id: state.clientId,
+    callback: onGoogleCredential,
+    auto_select: false,
+    cancel_on_tap_outside: true,
+  });
+  renderGoogleButton($("account-google"), "signin");
+}
+
+function renderGoogleButton(node, text) {
+  if (!window.google?.accounts?.id || !state.clientId) return;
+  node.innerHTML = "";
+  google.accounts.id.renderButton(node, { theme: "outline", size: "medium", shape: "pill", text });
+}
+
+function renderAccount() {
+  const user = state.user;
+  $("account-user").hidden = !user;
+  $("account-google").hidden = Boolean(user) || !state.clientId;
+  $("account-off").hidden = Boolean(user) || Boolean(state.clientId);
+  if (user) {
+    $("account-name").textContent = user.name || user.email;
+    $("account-user").title = user.email || "";
+    $("account-avatar").hidden = !user.picture;
+    if (user.picture) $("account-avatar").src = user.picture;
+  }
+}
+
+async function onGoogleCredential(response) {
+  try {
+    const result = await fetch("/api/auth/google", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credential: response.credential }),
+    });
+    if (!result.ok) throw new Error(await readError(result));
+    state.user = (await result.json()).user;
+    renderAccount();
+    $("signin").hidden = true;
+    toast(`Signed in as ${state.user.name || state.user.email}.`);
+    const next = state.afterSignIn;
+    state.afterSignIn = null;
+    if (next) next();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function signOut() {
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+  } catch {
+    // The cookie is cleared server-side; a network blip here still signs out locally.
+  }
+  window.google?.accounts?.id?.disableAutoSelect();
+  signedOut();
+  toast("Signed out.");
+}
+
+function signedOut() {
+  state.user = null;
+  state.collectionId = null;
+  state.collectionName = "";
+  $("collection").hidden = true;
+  renderAccount();
+  renderGoogleButton($("account-google"), "signin");
+}
+
+function askSignIn(next) {
+  if (!state.clientId) {
+    toast("Google sign-in isn't set up on this server yet.");
+    return;
+  }
+  state.afterSignIn = next;
+  $("signin").hidden = false;
+  renderGoogleButton($("signin-button"), "signin_with");
+}
+
+async function checkSignedIn(response, next) {
+  if (response.status !== 401) return false;
+  signedOut();
+  askSignIn(next);
+  return true;
 }
 
 function canvasBase64(canvas) {
@@ -1707,6 +1825,10 @@ function canvasBase64(canvas) {
 
 async function saveRoom() {
   if (!state.sessionId) return;
+  if (!state.user) {
+    askSignIn(saveRoom);
+    return;
+  }
   let name = state.collectionName;
   if (!state.collectionId) {
     name = window.prompt("Name this room", "Room");
@@ -1733,6 +1855,7 @@ async function saveRoom() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: name || "Room", surfaces }),
     });
+    if (await checkSignedIn(response, saveRoom)) return;
     if (!response.ok) throw new Error(await readError(response));
     const body = await response.json();
     state.collectionId = body.id;
@@ -1748,6 +1871,7 @@ async function uploadCollection(files) {
   files.forEach((file) => body.append("files", file, file.webkitRelativePath || file.name));
   try {
     const response = await fetch("/api/collection/import", { method: "POST", body });
+    if (await checkSignedIn(response, showCollection)) return;
     if (!response.ok) throw new Error(await readError(response));
     const saved = (await response.json()).rooms;
     const names = saved.map((room) => room.name).join(", ");
@@ -1759,11 +1883,16 @@ async function uploadCollection(files) {
 }
 
 async function showCollection() {
+  if (!state.user) {
+    askSignIn(showCollection);
+    return;
+  }
   $("collection").hidden = false;
   const list = $("collection-list");
   list.innerHTML = "";
   try {
     const response = await fetch("/api/collection");
+    if (await checkSignedIn(response, showCollection)) return;
     if (!response.ok) throw new Error(await readError(response));
     const rooms = await response.json();
     if (!rooms.length) {
@@ -1813,6 +1942,7 @@ async function openSaved(roomId) {
   setBusy(true);
   try {
     const response = await fetch(`/api/collection/${roomId}/open`, { method: "POST" });
+    if (await checkSignedIn(response, showCollection)) return;
     if (!response.ok) throw new Error(await readError(response));
     const body = await response.json();
     await adoptSession(body, false);
@@ -1830,6 +1960,7 @@ async function removeSaved(roomId, name) {
   if (!window.confirm(`Remove ${name} from the collection?`)) return;
   try {
     const response = await fetch(`/api/collection/${roomId}`, { method: "DELETE" });
+    if (await checkSignedIn(response, showCollection)) return;
     if (!response.ok) throw new Error(await readError(response));
     if (state.collectionId === roomId) {
       state.collectionId = null;

@@ -1,11 +1,13 @@
 import base64
-from pathlib import Path
+import json
 
 import cv2
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.storage import DiskStore
 from app.sample_room import make_sample_room
 
 client = TestClient(app)
@@ -95,19 +97,29 @@ def test_lines_split_the_photo():
     assert len(split.json()["surfaces"]) >= 2
 
 
-def test_collection_saves_and_reopens(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.collection.COLLECTION", tmp_path)
-    image = np.full((80, 120, 3), 180, np.uint8)
-    ok, encoded = cv2.imencode(".png", image)
-    assert ok
-    created = client.post("/api/sessions", files={"file": ("room.png", encoded.tobytes(), "image/png")})
-    assert created.status_code == 200
-    session_id = created.json()["session_id"]
-    mask = np.zeros((80, 120), np.uint8)
+@pytest.fixture
+def signed_in(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.collection.store", lambda: DiskStore(tmp_path))
+
+    def sign_in(user_id="user-1"):
+        monkeypatch.setattr(
+            "app.auth.verify_google_token",
+            lambda credential: {"id": user_id, "email": f"{user_id}@example.com", "name": user_id, "picture": ""},
+        )
+        browser = TestClient(app)
+        response = browser.post("/api/auth/google", json={"credential": "token"})
+        assert response.status_code == 200, response.text
+        return browser
+
+    return sign_in
+
+
+def _room_payload(height=80, width=120):
+    mask = np.zeros((height, width), np.uint8)
     mask[10:50, 10:60] = 255
     ok, mask_png = cv2.imencode(".png", mask)
     assert ok
-    payload = {
+    return {
         "name": "North wall",
         "surfaces": [
             {
@@ -123,45 +135,100 @@ def test_collection_saves_and_reopens(tmp_path, monkeypatch):
             }
         ],
     }
-    saved = client.post(f"/api/sessions/{session_id}/collection", json=payload)
+
+
+def _session(browser):
+    image = np.full((80, 120, 3), 180, np.uint8)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    created = browser.post("/api/sessions", files={"file": ("room.png", encoded.tobytes(), "image/png")})
+    assert created.status_code == 200
+    return created.json()["session_id"]
+
+
+def test_collection_needs_sign_in(signed_in):
+    browser = TestClient(app)
+    assert browser.get("/api/auth/me").json()["user"] is None
+    assert browser.get("/api/collection").status_code == 401
+    session_id = _session(browser)
+    assert browser.post(f"/api/sessions/{session_id}/collection", json=_room_payload()).status_code == 401
+
+
+def test_collection_saves_and_reopens(signed_in):
+    browser = signed_in()
+    assert browser.get("/api/auth/me").json()["user"]["id"] == "user-1"
+    session_id = _session(browser)
+    payload = _room_payload()
+    saved = browser.post(f"/api/sessions/{session_id}/collection", json=payload)
     assert saved.status_code == 200, saved.text
     room_id = saved.json()["id"]
-    listed = client.get("/api/collection")
+    listed = browser.get("/api/collection")
     assert listed.status_code == 200
     assert listed.json()[0]["name"] == "North wall"
     assert listed.json()[0]["walls"] == 1
-    thumb = client.get(f"/api/collection/{room_id}/thumb")
+    thumb = browser.get(f"/api/collection/{room_id}/thumb")
     assert thumb.status_code == 200
-    opened = client.post(f"/api/collection/{room_id}/open")
+    opened = browser.post(f"/api/collection/{room_id}/open")
     assert opened.status_code == 200
     surface = opened.json()["surfaces"][0]
     assert surface["color"] == "#6E7F62"
     assert surface["sheen"] == "matte"
     assert surface["shade"] == -2
     payload["surfaces"][0]["color"] = "#112233"
-    updated = client.put(f"/api/collection/{room_id}?session_id={opened.json()['session_id']}", json=payload)
+    updated = browser.put(f"/api/collection/{room_id}?session_id={opened.json()['session_id']}", json=payload)
     assert updated.status_code == 200
-    again = client.post(f"/api/collection/{room_id}/open")
+    again = browser.post(f"/api/collection/{room_id}/open")
     assert again.json()["surfaces"][0]["color"] == "#112233"
-    removed = client.delete(f"/api/collection/{room_id}")
+    removed = browser.delete(f"/api/collection/{room_id}")
     assert removed.status_code == 200
-    assert client.get("/api/collection").json() == []
+    assert browser.get("/api/collection").json() == []
 
 
-def test_collection_imports_saved_folders(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.collection.COLLECTION", tmp_path)
+def test_collection_survives_sign_out_and_back_in(signed_in):
+    browser = signed_in("user-1")
+    saved = browser.post(f"/api/sessions/{_session(browser)}/collection", json=_room_payload())
+    assert saved.status_code == 200
+    assert browser.post("/api/auth/logout").status_code == 200
+    assert browser.get("/api/collection").status_code == 401
+    later = signed_in("user-1")
+    assert [room["id"] for room in later.get("/api/collection").json()] == [saved.json()["id"]]
+
+
+def test_collections_are_private_to_each_account(signed_in):
+    first = signed_in("user-1")
+    room_id = first.post(f"/api/sessions/{_session(first)}/collection", json=_room_payload()).json()["id"]
+    second = signed_in("user-2")
+    assert second.get("/api/collection").json() == []
+    assert second.post(f"/api/collection/{room_id}/open").status_code == 404
+    assert second.get(f"/api/collection/{room_id}/thumb").status_code == 404
+    assert second.delete(f"/api/collection/{room_id}").status_code == 404
+    assert len(first.get("/api/collection").json()) == 1
+
+
+def test_collection_imports_saved_folders(signed_in):
+    browser = signed_in()
+    image = np.full((80, 120, 3), 200, np.uint8)
+    mask = np.zeros((80, 120), np.uint8)
+    mask[:, :60] = 255
     uploads = []
-    root = Path(__file__).resolve().parents[1] / "data" / "collection"
-    for folder in (root / "0ee9bea3eb40", root / "9d228c0aae6a"):
-        for path in folder.iterdir():
-            uploads.append(("files", (f"{folder.name}/{path.name}", path.read_bytes())))
-    imported = client.post("/api/collection/import", files=uploads)
+    for room_id, name, walls in (("0ee9bea3eb40", "LivingRoom1", 1), ("9d228c0aae6a", "LivingRoom2", 4)):
+        meta = {
+            "id": room_id,
+            "name": name,
+            "saved_at": "2026-01-01T00:00:00+00:00",
+            "surfaces": [{"name": f"Wall {index + 1}", "kind": "wall", "mask": f"mask-{index}.png"} for index in range(walls)],
+        }
+        uploads.append(("files", (f"{room_id}/room.json", json.dumps(meta).encode("utf-8"))))
+        uploads.append(("files", (f"{room_id}/photo.png", cv2.imencode(".png", image)[1].tobytes())))
+        for index in range(walls):
+            uploads.append(("files", (f"{room_id}/mask-{index}.png", cv2.imencode(".png", mask)[1].tobytes())))
+    imported = browser.post("/api/collection/import", files=uploads)
     assert imported.status_code == 200, imported.text
     names = {room["name"] for room in imported.json()["rooms"]}
     assert names == {"LivingRoom1", "LivingRoom2"}
-    listed = {room["name"]: room for room in client.get("/api/collection").json()}
+    listed = {room["name"]: room for room in browser.get("/api/collection").json()}
     assert listed["LivingRoom2"]["walls"] == 4
     assert listed["LivingRoom1"]["walls"] == 1
-    opened = client.post(f"/api/collection/{listed['LivingRoom2']['id']}/open")
+    opened = browser.post(f"/api/collection/{listed['LivingRoom2']['id']}/open")
     assert opened.status_code == 200
     assert len(opened.json()["surfaces"]) == 4

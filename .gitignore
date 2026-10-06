@@ -6,3 +6,5 @@ __pycache__/
 .mypy_cache/
 data/source/
 data/collection/
+.env
+data/.session_secret
