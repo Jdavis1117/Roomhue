@@ -48,7 +48,7 @@ Open the app at `http://localhost:8765` rather than `127.0.0.1`; Google only acc
 
 ## Where saved rooms are kept
 
-Rooms are filed under the Google account's id. On Replit they go to Replit Object Storage, which survives redeploys; create a bucket once from the Object Storage tool in the workspace. Running anywhere else, they go to `data/collection/users/` on that computer. Set `ROOMHUE_STORAGE=disk` or `ROOMHUE_STORAGE=replit` to choose explicitly.
+Rooms are filed under the Google account's id. On Replit they go to Replit Object Storage, which survives redeploys; create a bucket once from the Object Storage tool in the workspace. Running anywhere else, they go to `data/collection/users/` on that computer. Set `ROOMHUE_STORAGE=disk` or `ROOMHUE_STORAGE=replit` to choose explicitly. If the published app can't find the default bucket, add a `ROOMHUE_BUCKET_ID` secret with the bucket's ID from the Object Storage tool.
 
 ## How a photo becomes paint
 

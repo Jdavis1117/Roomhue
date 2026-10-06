@@ -2,15 +2,21 @@
 
 On Replit the files go to Replit Object Storage, which survives redeploys.
 Anywhere else they go to data/collection on this computer. Set
-ROOMHUE_STORAGE to "disk" or "replit" to choose explicitly.
+ROOMHUE_STORAGE to "disk" or "replit" to choose explicitly, and
+ROOMHUE_BUCKET_ID to name the Replit bucket instead of using the default one.
 """
 
 from __future__ import annotations
 
+import functools
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
 
+from fastapi import HTTPException
+
+log = logging.getLogger("roomhue.storage")
 ROOT = Path(__file__).resolve().parent.parent
 DISK_ROOT = ROOT / "data" / "collection"
 
@@ -41,23 +47,46 @@ class DiskStore:
         self._path(key).unlink(missing_ok=True)
 
 
+def _reported(method):
+    """Turn an Object Storage failure into a message that says what went wrong."""
+
+    @functools.wraps(method)
+    def run(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.exception("Object Storage %s failed", method.__name__)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Saved rooms storage isn't reachable ({type(exc).__name__}: {exc}).",
+            ) from exc
+
+    return run
+
+
 class ReplitStore:
     def __init__(self) -> None:
         from replit.object_storage import Client
 
-        self.client = Client()
+        self.client = Client(bucket_id=os.environ.get("ROOMHUE_BUCKET_ID", "").strip() or None)
 
+    @_reported
     def read(self, key: str) -> bytes | None:
         if not self.client.exists(key):
             return None
         return self.client.download_as_bytes(key)
 
+    @_reported
     def write(self, key: str, data: bytes) -> None:
         self.client.upload_from_bytes(key, data)
 
+    @_reported
     def list(self, prefix: str) -> list[str]:
         return [item.name for item in self.client.list(prefix=prefix)]
 
+    @_reported
     def delete(self, key: str) -> None:
         self.client.delete(key, ignore_not_found=True)
 
@@ -68,5 +97,9 @@ def store() -> DiskStore | ReplitStore:
     if not choice:
         choice = "replit" if os.environ.get("REPL_ID") else "disk"
     if choice == "replit":
-        return ReplitStore()
+        try:
+            return ReplitStore()
+        except Exception as exc:
+            log.exception("Object Storage could not start")
+            raise HTTPException(status_code=503, detail=f"Saved rooms storage isn't reachable ({type(exc).__name__}: {exc}).") from exc
     return DiskStore(DISK_ROOT)
