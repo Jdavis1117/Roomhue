@@ -1,4 +1,4 @@
-/* Roomhue studio. Color math matches app/color_math.py. */
+/* RoomRoller studio. Color math matches app/color_math.py. */
 
 const LIGHTNESS_PULL = 0.72;
 const TEXTURE_KEEP = 0.18;
@@ -54,9 +54,27 @@ const state = {
   painting: false,
   lastPoint: null,
   customCount: 0,
+  maskSerial: 0,
+  paintImage: null,
+  paintKeys: new Map(),
+  tintCache: null,
+  frameQueued: false,
+  redrawQueued: false,
+  fitQueued: false,
+  pointers: new Map(),
+  gesture: null,
+  gestureTarget: null,
+  afterGesture: false,
+  tap: null,
+  lastTap: null,
+  lastPointerType: "mouse",
+  sheet: "half",
+  sheetTab: "fold-brands",
 };
 
 const $ = (id) => document.getElementById(id);
+const mobileQuery = window.matchMedia("(max-width: 900px)");
+const touchQuery = window.matchMedia("(pointer: coarse)");
 const view = $("view");
 const viewCtx = view.getContext("2d");
 
@@ -247,7 +265,7 @@ function snapshot() {
 
 function restore(shot) {
   state.selectedId = shot.selectedId;
-  state.surfaces = shot.surfaces.map((surface) => ({ ...surface, feather: null }));
+  state.surfaces = shot.surfaces.map((surface) => ({ ...surface, maskVersion: freshVersion(), feather: null }));
   state.paintDirty = true;
   renderSurfaces();
   syncFinish();
@@ -274,8 +292,13 @@ function syncHistoryButtons() {
   $("redo-btn").disabled = state.redo.length === 0;
 }
 
+function freshVersion() {
+  state.maskSerial += 1;
+  return state.maskSerial;
+}
+
 function bumpMask(surface) {
-  surface.maskVersion += 1;
+  surface.maskVersion = freshVersion();
   surface.feather = null;
   state.paintDirty = true;
 }
@@ -305,6 +328,9 @@ async function adoptSession(payload, keepPhoto) {
     state.paintCanvas.height = state.height;
     view.width = state.width;
     view.height = state.height;
+    state.paintImage = null;
+    state.paintKeys = new Map();
+    state.tintCache = null;
     buildLab();
   }
   state.surfaces = [];
@@ -324,6 +350,7 @@ async function adoptSession(payload, keepPhoto) {
   }
   state.paintDirty = true;
   $("empty").hidden = true;
+  document.body.classList.add("has-photo");
   $("studio").hidden = false;
   $("export-btn").disabled = false;
   $("save-btn").disabled = false;
@@ -334,6 +361,7 @@ async function adoptSession(payload, keepPhoto) {
   syncFinish();
   syncHistoryButtons();
   redraw();
+  warmSurfaces();
   if (!keepPhoto) setTool(payload.surfaces.length ? "select" : "dots");
   else setStatus();
 }
@@ -351,7 +379,7 @@ async function makeSurface(item) {
     shade: item.shade || 0,
     included: item.included !== false,
     maskCanvas: await maskFromPng(item.mask_png_base64),
-    maskVersion: 1,
+    maskVersion: freshVersion(),
     feather: null,
   };
 }
@@ -381,6 +409,7 @@ function medianOf(values) {
 }
 
 function surfaceMedian(surface) {
+  if (surface.median && surface.medianVersion === surface.maskVersion) return surface.median;
   const alpha = maskAlpha(surface.maskCanvas);
   const count = state.width * state.height;
   const ls = [];
@@ -392,7 +421,9 @@ function surfaceMedian(surface) {
     as.push(state.lab.A[i]);
     bs.push(state.lab.B[i]);
   }
-  return { L: medianOf(ls), A: medianOf(as), B: medianOf(bs) };
+  surface.median = { L: medianOf(ls), A: medianOf(as), B: medianOf(bs) };
+  surface.medianVersion = surface.maskVersion;
+  return surface.median;
 }
 
 function feather(surface) {
@@ -405,24 +436,43 @@ function feather(surface) {
   ctx.drawImage(surface.maskCanvas, 0, 0);
   const pixels = ctx.getImageData(0, 0, state.width, state.height).data;
   const alpha = new Float32Array(state.width * state.height);
+  let x0 = state.width;
+  let y0 = state.height;
+  let x1 = 0;
+  let y1 = 0;
   for (let i = 0; i < alpha.length; i += 1) {
     const value = pixels[i * 4 + 3] / 255;
     alpha[i] = value < 0.04 ? 0 : value;
+    if (alpha[i]) {
+      const x = i % state.width;
+      const y = (i - x) / state.width;
+      if (x < x0) x0 = x;
+      if (x >= x1) x1 = x + 1;
+      if (y < y0) y0 = y;
+      if (y >= y1) y1 = y + 1;
+    }
   }
   surface.feather = alpha;
+  surface.box = x1 > x0 ? { x0, y0, x1, y1 } : null;
   surface.featherVersion = surface.maskVersion;
   return alpha;
 }
 
-function applySurface(data, surface) {
+function applySurface(data, surface, region) {
   const paint = paintLab(surface.color, surface.shade);
   if (!paint) return;
   const alpha = feather(surface);
+  const box = surface.box;
+  if (!box) return;
+  const x0 = Math.max(box.x0, region.x0);
+  const x1 = Math.min(box.x1, region.x1);
+  const y0 = Math.max(box.y0, region.y0);
+  const y1 = Math.min(box.y1, region.y1);
+  if (x0 >= x1 || y0 >= y1) return;
   const med = surfaceMedian(surface);
   const shine = SHEEN_AMOUNT[surface.sheen] || 0;
   const src = state.lab.rgb;
-  const count = alpha.length;
-  for (let i = 0; i < count; i += 1) {
+  for (let y = y0; y < y1; y += 1) for (let i = y * state.width + x0, end = y * state.width + x1; i < end; i += 1) {
     const coverage = alpha[i] * surface.coverage;
     if (coverage <= 0) continue;
     const L = state.lab.L[i];
@@ -447,15 +497,129 @@ function applySurface(data, surface) {
   }
 }
 
+function warmSurfaces() {
+  // Prepare each surface's soft edge and median while the phone is idle, so the first color tap is quick.
+  const idle = window.requestIdleCallback || ((run) => setTimeout(run, 60));
+  const queue = state.surfaces.slice();
+  const next = () => {
+    const surface = queue.shift();
+    if (!surface) return;
+    if (state.surfaces.includes(surface) && state.lab) {
+      feather(surface);
+      surfaceMedian(surface);
+    }
+    idle(next);
+  };
+  idle(next);
+}
+
+function paintKey(surface) {
+  if (surface.included === false || !surface.color) return "";
+  return `${surface.maskVersion}|${surface.color}|${surface.shade}|${surface.sheen}|${surface.coverage}`;
+}
+
 function rebuildPaint() {
+  // Repaint only the area of surfaces whose mask or paint changed since the last pass.
+  const width = state.width;
+  const height = state.height;
   const ctx = state.paintCanvas.getContext("2d");
-  const image = ctx.createImageData(state.width, state.height);
-  image.data.set(state.lab.rgb);
+  const painted = new Map();
   for (const surface of state.surfaces) {
-    if (surface.included !== false && surface.color) applySurface(image.data, surface);
+    const key = paintKey(surface);
+    if (key) painted.set(surface.id, { key, surface });
   }
-  ctx.putImageData(image, 0, 0);
+  let region = null;
+  const grow = (box) => {
+    if (!box) return;
+    region = region
+      ? { x0: Math.min(region.x0, box.x0), y0: Math.min(region.y0, box.y0), x1: Math.max(region.x1, box.x1), y1: Math.max(region.y1, box.y1) }
+      : { ...box };
+  };
+  if (!state.paintImage || state.paintImage.width !== width || state.paintImage.height !== height) {
+    state.paintImage = ctx.createImageData(width, height);
+    region = { x0: 0, y0: 0, x1: width, y1: height };
+  } else {
+    for (const [id, before] of state.paintKeys) {
+      const now = painted.get(id);
+      if (!now || now.key !== before.key) grow(before.box);
+    }
+    for (const [id, now] of painted) {
+      const before = state.paintKeys.get(id);
+      if (before && before.key === now.key) continue;
+      feather(now.surface);
+      grow(now.surface.box);
+    }
+  }
+  if (region) {
+    const data = state.paintImage.data;
+    const src = state.lab.rgb;
+    for (let y = region.y0; y < region.y1; y += 1) {
+      const start = (y * width + region.x0) * 4;
+      data.set(src.subarray(start, (y * width + region.x1) * 4), start);
+    }
+    for (const { surface } of painted.values()) applySurface(data, surface, region);
+    ctx.putImageData(state.paintImage, 0, 0, region.x0, region.y0, region.x1 - region.x0, region.y1 - region.y0);
+  }
+  state.paintKeys = new Map();
+  for (const [id, { key, surface }] of painted) {
+    feather(surface);
+    state.paintKeys.set(id, { key, box: surface.box });
+  }
   state.paintDirty = false;
+}
+
+function tintLayer(skipId) {
+  const key = state.surfaces
+    .map((surface, index) =>
+      surface.included === false || surface.color || surface.id === skipId
+        ? ""
+        : `${surface.id}:${surface.maskVersion}:${index}:${surface.id === state.selectedId ? 1 : 0}`,
+    )
+    .join(",");
+  let cache = state.tintCache;
+  if (cache && cache.key === key && cache.canvas.width === state.width && cache.canvas.height === state.height) return cache.canvas;
+  if (!cache) cache = state.tintCache = { canvas: document.createElement("canvas"), key: "" };
+  cache.canvas.width = state.width;
+  cache.canvas.height = state.height;
+  const ctx = cache.canvas.getContext("2d");
+  state.surfaces.forEach((surface, index) => {
+    if (surface.included === false || surface.color || surface.id === skipId) return;
+    drawTint(ctx, surface, TINTS[index % TINTS.length], surface.id === state.selectedId ? 0.42 : 0.28);
+  });
+  cache.key = key;
+  return cache.canvas;
+}
+
+function requestFrame() {
+  if (state.frameQueued) return;
+  state.frameQueued = true;
+  requestAnimationFrame(runFrame);
+}
+
+function runFrame() {
+  state.frameQueued = false;
+  if (state.gesture && state.gestureTarget) {
+    const target = state.gestureTarget;
+    state.gestureTarget = null;
+    placeAt((state.gesture.zoom * target.dist) / state.gesture.dist, state.gesture.fraction, target);
+  } else if (state.fitQueued) {
+    fit();
+  }
+  state.fitQueued = false;
+  if (state.redrawQueued) {
+    state.redrawQueued = false;
+    redraw();
+  }
+}
+
+function scheduleRedraw() {
+  state.redrawQueued = true;
+  requestFrame();
+}
+
+function scheduleFit() {
+  state.fitQueued = true;
+  requestFrame();
 }
 
 function drawTint(ctx, surface, color, alpha) {
@@ -483,11 +647,12 @@ function redraw() {
   if (state.paintDirty && !state.painting) rebuildPaint();
   viewCtx.clearRect(0, 0, state.width, state.height);
   viewCtx.drawImage(state.paintCanvas, 0, 0);
-  state.surfaces.forEach((surface, index) => {
-    if (surface.included === false || surface.color) return;
-    const tint = TINTS[index % TINTS.length];
-    drawTint(viewCtx, surface, tint, surface.id === state.selectedId ? 0.42 : 0.28);
-  });
+  const live = state.painting ? selected() : null;
+  viewCtx.drawImage(tintLayer(live ? live.id : null), 0, 0);
+  if (live && live.included !== false && !live.color) {
+    const index = state.surfaces.indexOf(live);
+    drawTint(viewCtx, live, TINTS[index % TINTS.length], 0.42);
+  }
   if (state.compare < 0.999) {
     const cut = state.width * (1 - state.compare);
     viewCtx.save();
@@ -549,54 +714,58 @@ function screenRadius(pixels) {
   return scale ? pixels / scale : pixels;
 }
 
+function baseSize() {
+  const stage = $("stage");
+  const base = Math.min(stage.clientWidth / state.width, stage.clientHeight / state.height);
+  return {
+    stage,
+    width: Math.max(1, Math.floor(state.width * base)),
+    height: Math.max(1, Math.floor(state.height * base)),
+  };
+}
+
 function fit() {
   if (!state.width) return;
   clampPan();
-  const stage = $("stage");
-  const base = Math.min(stage.clientWidth / state.width, stage.clientHeight / state.height);
-  const scale = base * state.zoom;
-  const width = Math.max(1, Math.floor(state.width * scale));
-  const height = Math.max(1, Math.floor(state.height * scale));
-  view.style.width = `${width}px`;
-  view.style.height = `${height}px`;
-  view.style.left = `${(stage.clientWidth - width) / 2 + state.panX}px`;
-  view.style.top = `${(stage.clientHeight - height) / 2 + state.panY}px`;
-  view.style.transform = "none";
+  const { stage, width, height } = baseSize();
+  if (view.style.width !== `${width}px`) view.style.width = `${width}px`;
+  if (view.style.height !== `${height}px`) view.style.height = `${height}px`;
+  const x = (stage.clientWidth - width * state.zoom) / 2 + state.panX;
+  const y = (stage.clientHeight - height * state.zoom) / 2 + state.panY;
+  view.style.transform = `translate3d(${x}px, ${y}px, 0) scale(${state.zoom})`;
 }
 
 function clampPan() {
-  const stage = $("stage");
-  const base = Math.min(stage.clientWidth / state.width, stage.clientHeight / state.height);
-  const viewW = state.width * base * state.zoom;
-  const viewH = state.height * base * state.zoom;
-  const maxX = Math.max(0, (viewW - stage.clientWidth) / 2);
-  const maxY = Math.max(0, (viewH - stage.clientHeight) / 2);
+  const { stage, width, height } = baseSize();
+  const maxX = Math.max(0, (width * state.zoom - stage.clientWidth) / 2);
+  const maxY = Math.max(0, (height * state.zoom - stage.clientHeight) / 2);
   state.panX = Math.min(maxX, Math.max(-maxX, state.panX));
   state.panY = Math.min(maxY, Math.max(-maxY, state.panY));
 }
 
-function setZoom(next, anchor) {
-  const zoom = Math.min(8, Math.max(1, next));
-  const stage = $("stage");
+function fractionAt(point) {
   const rect = view.getBoundingClientRect();
-  let across = 0.5;
-  let down = 0.5;
-  if (anchor && rect.width > 0 && rect.height > 0) {
-    across = (anchor.x - rect.left) / rect.width;
-    down = (anchor.y - rect.top) / rect.height;
-  }
-  state.zoom = zoom;
-  if (anchor && state.width) {
-    const base = Math.min(stage.clientWidth / state.width, stage.clientHeight / state.height);
-    const width = Math.max(1, Math.floor(state.width * base * zoom));
-    const height = Math.max(1, Math.floor(state.height * base * zoom));
-    const box = stage.getBoundingClientRect();
-    const layoutLeft = box.left + (stage.clientWidth - width) / 2;
-    const layoutTop = box.top + (stage.clientHeight - height) / 2;
-    state.panX = anchor.x - across * width - layoutLeft;
-    state.panY = anchor.y - down * height - layoutTop;
-  }
+  if (!rect.width || !rect.height) return { x: 0.5, y: 0.5 };
+  return { x: (point.x - rect.left) / rect.width, y: (point.y - rect.top) / rect.height };
+}
+
+function placeAt(zoom, fraction, point) {
+  // Zoom so the spot at `fraction` of the photo sits under the screen `point`.
+  state.zoom = Math.min(8, Math.max(1, zoom));
+  const { stage, width, height } = baseSize();
+  const box = stage.getBoundingClientRect();
+  const shownWidth = width * state.zoom;
+  const shownHeight = height * state.zoom;
+  state.panX = point.x - box.left - (stage.clientWidth - shownWidth) / 2 - fraction.x * shownWidth;
+  state.panY = point.y - box.top - (stage.clientHeight - shownHeight) / 2 - fraction.y * shownHeight;
   fit();
+}
+
+function setZoom(next, anchor) {
+  if (!state.width) return;
+  const box = $("stage").getBoundingClientRect();
+  const point = anchor || { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  placeAt(next, fractionAt(point), point);
 }
 
 function zoomAnchor() {
@@ -609,8 +778,8 @@ function setStatus() {
   if (state.tool === "dots") {
     const count = state.draft ? state.draft.length : 0;
     $("status").textContent = count
-      ? `${count} dot${count === 1 ? "" : "s"} placed. Click the remaining corners, then Add wall.`
-      : "Click to place a dot at each corner of a wall.";
+      ? `${count} dot${count === 1 ? "" : "s"} placed. ${tapWord()} the remaining corners, then Add wall.`
+      : `${tapWord()} to place a dot at each corner of a wall.`;
     return;
   }
   if (!state.surfaces.length) {
@@ -621,12 +790,19 @@ function setStatus() {
   const extras = state.surfaces
     .filter((surface) => surface.kind !== "wall")
     .map((surface) => surface.name.toLowerCase());
-  const tools = {
-    select: "Click a tinted surface, then pick a color. Click it again to deselect. Uncheck one to leave it out.",
-    wand: "Click a wall to mark it. Raise wand reach if the selection stops short.",
-    brush: "Paint the mask to add the missing part of a surface.",
-    eraser: "Erase the mask where the color should not go.",
-  };
+  const tools = touchQuery.matches
+    ? {
+        select: "Tap a wall, then pick a color. Pinch or double-tap to zoom.",
+        wand: "Tap a wall to mark it. Raise wand reach if it stops short.",
+        brush: "Paint with a finger to add to the surface. Two fingers zoom.",
+        eraser: "Erase with a finger where the color should not go.",
+      }
+    : {
+        select: "Click a tinted surface, then pick a color. Click it again to deselect. Uncheck one to leave it out.",
+        wand: "Click a wall to mark it. Raise wand reach if the selection stops short.",
+        brush: "Paint the mask to add the missing part of a surface.",
+        eraser: "Erase the mask where the color should not go.",
+      };
   const found = [`${walls} wall${walls === 1 ? "" : "s"}`, ...extras].filter(Boolean).join(", ");
   $("status").textContent = `${found}. ${tools[state.tool]}`;
 }
@@ -692,6 +868,7 @@ function renderSurfaces() {
   });
   const current = selected();
   $("clear-color").disabled = !current || !current.color;
+  $("clear-color-finish").disabled = !current || !current.color;
   $("apply-all").disabled = !current || !current.color;
 }
 
@@ -699,7 +876,7 @@ function selectSurface(id) {
   state.selectedId = state.selectedId === id ? null : id;
   renderSurfaces();
   syncFinish();
-  renderSwatches();
+  updateSwatchSelection();
   redraw();
 }
 
@@ -740,7 +917,6 @@ function renderSwatches() {
   const wrap = $("swatches");
   const scroll = wrap.scrollTop;
   wrap.innerHTML = "";
-  const current = selected();
   const query = state.search.trim();
   $("color-note").textContent = state.colorNote || "";
   if (!state.brand && query.length < 2) {
@@ -773,10 +949,18 @@ function renderSwatches() {
     summary.append(title, count);
     const grid = document.createElement("div");
     grid.className = "group-paints";
-    grouped.get(name).forEach((color) => grid.appendChild(paintButton(color, current)));
+    const fill = () => {
+      if (grid.childElementCount) return;
+      const active = selected();
+      const fragment = document.createDocumentFragment();
+      grouped.get(name).forEach((color) => fragment.appendChild(paintButton(color, active)));
+      grid.appendChild(fragment);
+    };
+    if (details.open) fill();
     details.append(summary, grid);
     details.addEventListener("toggle", () => {
       state.openGroups[name] = details.open;
+      if (details.open) fill();
     });
     wrap.appendChild(details);
   });
@@ -788,6 +972,7 @@ function paintButton(color, current) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "paint";
+  button.dataset.label = label;
   button.classList.toggle("is-on", Boolean(current && current.colorLabel === label));
   const chip = document.createElement("span");
   chip.className = "chip";
@@ -804,6 +989,14 @@ function paintButton(color, current) {
   button.setAttribute("aria-label", `${label} ${color.hex}`);
   button.addEventListener("click", () => chooseColor(color.hex, label));
   return button;
+}
+
+function updateSwatchSelection() {
+  const current = selected();
+  document.querySelectorAll("#swatches .paint.is-on").forEach((button) => button.classList.remove("is-on"));
+  if (!current || !current.colorLabel) return;
+  const match = document.querySelector(`#swatches .paint[data-label="${CSS.escape(current.colorLabel)}"]`);
+  if (match) match.classList.add("is-on");
 }
 
 async function loadColors(reset) {
@@ -866,7 +1059,7 @@ function chooseColor(hex, label) {
   state.paintDirty = true;
   rememberColor(current.color);
   renderSurfaces();
-  renderSwatches();
+  updateSwatchSelection();
   redraw();
   setPickerFromHex(current.color);
 }
@@ -995,7 +1188,7 @@ function previewPicker() {
   current.color = hex;
   current.colorLabel = "";
   state.paintDirty = true;
-  redraw();
+  scheduleRedraw();
 }
 
 function beginPick(event, canvas, target) {
@@ -1025,11 +1218,16 @@ function finishPick() {
   if (!current || !current.color) return;
   rememberColor(current.color);
   renderSurfaces();
-  renderSwatches();
+  updateSwatchSelection();
+}
+
+function tapWord() {
+  return touchQuery.matches ? "Tap" : "Click";
 }
 
 function setTool(tool) {
   state.tool = tool;
+  $("studio").dataset.tool = tool;
   document.querySelectorAll("[data-tool]").forEach((button) => {
     button.setAttribute("aria-pressed", button.dataset.tool === tool ? "true" : "false");
   });
@@ -1090,7 +1288,7 @@ function addWallFromDots() {
     shade: 0,
     included: true,
     maskCanvas,
-    maskVersion: 1,
+    maskVersion: freshVersion(),
     feather: null,
   });
   state.selectedId = state.surfaces[state.surfaces.length - 1].id;
@@ -1142,9 +1340,34 @@ function maskArea(surface) {
   return count;
 }
 
+function isTouchLike(event) {
+  return event.pointerType === "touch" || event.pointerType === "pen";
+}
+
+function pinchInfo() {
+  const [a, b] = [...state.pointers.values()];
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, dist: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
+}
+
+function startPinch() {
+  cancelStroke();
+  state.tap = null;
+  state.panning = false;
+  const info = pinchInfo();
+  state.gesture = { dist: info.dist, zoom: state.zoom, fraction: fractionAt(info) };
+}
+
 async function onPointerDown(event) {
   if (!state.sessionId) return;
+  state.lastPointerType = event.pointerType;
+  if (event.pointerType === "mouse" && event.button !== 0 && event.button !== 1) return;
   view.setPointerCapture(event.pointerId);
+  state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (state.pointers.size === 2 && isTouchLike(event)) {
+    startPinch();
+    return;
+  }
+  if (state.pointers.size > 1 || state.gesture || state.afterGesture) return;
   if (state.spaceDown || event.button === 1) {
     event.preventDefault();
     state.panning = true;
@@ -1153,26 +1376,60 @@ async function onPointerDown(event) {
     return;
   }
   const point = eventPoint(event);
+  if (state.tool === "brush" || state.tool === "eraser") {
+    beginStroke(point);
+    return;
+  }
+  if (isTouchLike(event)) {
+    // Wait for the finger to lift: a drag pans the photo, a tap acts.
+    state.tap = { x: event.clientX, y: event.clientY, point, shift: event.shiftKey, panX: state.panX, panY: state.panY, moved: false };
+    return;
+  }
+  await tapAction(point, event.shiftKey);
+}
+
+async function tapAction(point, shift) {
   if (state.tool === "select") {
     const hit = hitSurface(point.x, point.y);
-    if (hit) selectSurface(hit.id);
-    else if (state.selectedId) {
+    if (hit) {
+      selectSurface(hit.id);
+      if (state.selectedId) revealSheet();
+    } else if (state.selectedId) {
       state.selectedId = null;
       renderSurfaces();
       syncFinish();
-      renderSwatches();
+      updateSwatchSelection();
       redraw();
     }
     return;
   }
   if (state.tool === "wand") {
-    await runWand(point.x, point.y, event.shiftKey);
+    await runWand(point.x, point.y, shift);
     return;
   }
-  if (state.tool === "dots") {
-    addLinePoint(point);
+  if (state.tool === "dots") addLinePoint(point);
+}
+
+function touchTap(tap) {
+  const now = performance.now();
+  const last = state.lastTap;
+  if (state.tool === "select" && last && now - last.time < 320 && Math.hypot(tap.x - last.x, tap.y - last.y) < 32) {
+    state.lastTap = null;
+    if (state.zoom > 1.05) {
+      state.zoom = 1;
+      state.panX = 0;
+      state.panY = 0;
+      fit();
+    } else {
+      setZoom(2.5, { x: tap.x, y: tap.y });
+    }
     return;
   }
+  state.lastTap = { x: tap.x, y: tap.y, time: now };
+  tapAction(tap.point, tap.shift);
+}
+
+function beginStroke(point) {
   pushUndo();
   let current = selected();
   if (!current) {
@@ -1183,6 +1440,82 @@ async function onPointerDown(event) {
   state.painting = true;
   state.lastPoint = point;
   stroke(point, point);
+}
+
+function cancelStroke() {
+  // A second finger means a pinch, so the first finger's brush mark is undone.
+  if (!state.painting) return;
+  state.painting = false;
+  state.lastPoint = null;
+  const shot = state.undo.pop();
+  if (shot) restore(shot);
+}
+
+function onPointerMove(event) {
+  state.zoomAnchor = { x: event.clientX, y: event.clientY };
+  moveBrushCursor(event);
+  if (state.pointers.has(event.pointerId)) state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (state.gesture) {
+    if (state.pointers.size >= 2) {
+      state.gestureTarget = pinchInfo();
+      requestFrame();
+    }
+    return;
+  }
+  if (state.tap) {
+    const dx = event.clientX - state.tap.x;
+    const dy = event.clientY - state.tap.y;
+    if (!state.tap.moved && Math.hypot(dx, dy) > 10) state.tap.moved = true;
+    if (state.tap.moved && state.zoom > 1) {
+      state.panX = state.tap.panX + dx;
+      state.panY = state.tap.panY + dy;
+      scheduleFit();
+    }
+    return;
+  }
+  if (state.panning && state.panOrigin) {
+    state.panX = state.panOrigin.panX + (event.clientX - state.panOrigin.x);
+    state.panY = state.panOrigin.panY + (event.clientY - state.panOrigin.y);
+    scheduleFit();
+    return;
+  }
+  if (!state.painting) return;
+  const events = event.getCoalescedEvents ? event.getCoalescedEvents() : [];
+  for (const each of events.length ? events : [event]) {
+    const point = eventPoint(each);
+    stroke(state.lastPoint, point);
+    state.lastPoint = point;
+  }
+}
+
+function onPointerUp(event) {
+  const tap = state.tap;
+  state.pointers.delete(event.pointerId);
+  if (state.gesture) {
+    if (state.pointers.size < 2) {
+      state.gesture = null;
+      state.gestureTarget = null;
+      state.afterGesture = state.pointers.size > 0;
+    }
+    return;
+  }
+  if (state.afterGesture) {
+    if (state.pointers.size === 0) state.afterGesture = false;
+    return;
+  }
+  if (tap) {
+    state.tap = null;
+    if (!tap.moved && event.type === "pointerup") touchTap(tap);
+    return;
+  }
+  if (state.panning) {
+    state.panning = false;
+    view.style.cursor = state.spaceDown ? "grab" : state.tool === "select" || state.tool === "wand" || state.tool === "dots" ? "crosshair" : "none";
+  }
+  const wasPainting = state.painting;
+  state.painting = false;
+  state.lastPoint = null;
+  if (wasPainting) redraw();
 }
 
 function stampBrush(ctx, x, y) {
@@ -1218,7 +1551,7 @@ function stroke(from, to) {
   }
   ctx.globalCompositeOperation = "source-over";
   bumpMask(current);
-  redraw();
+  scheduleRedraw();
 }
 
 function createCustomSurface() {
@@ -1234,7 +1567,7 @@ function createCustomSurface() {
     shade: 0,
     included: true,
     maskCanvas: emptyMask(state.width, state.height),
-    maskVersion: 1,
+    maskVersion: freshVersion(),
     feather: null,
   };
   state.surfaces.push(surface);
@@ -1253,7 +1586,7 @@ async function runWand(x, y, addToSelected) {
     if (!response.ok) throw new Error(await readError(response));
     const body = await response.json();
     if (body.area < 0.004) {
-      toast("That click didn't grab a surface. Raise wand reach or use the brush.");
+      toast(`That ${tapWord().toLowerCase()} didn't grab a surface. Raise wand reach or use the brush.`);
       return;
     }
     pushUndo();
@@ -1277,7 +1610,7 @@ async function runWand(x, y, addToSelected) {
         shade: 0,
         included: true,
         maskCanvas,
-        maskVersion: 1,
+        maskVersion: freshVersion(),
         feather: null,
       };
       state.surfaces.push(surface);
@@ -1295,6 +1628,24 @@ async function runWand(x, y, addToSelected) {
   }
 }
 
+async function shrinkPhoto(file) {
+  // Phone photos are often 3-10 MB. The server works at 1400 px, so send a 2000 px JPEG instead.
+  if (file.size < 1.5 * 1024 * 1024 || !window.createImageBitmap) return file;
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    const scale = Math.min(1, 2000 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    if (bitmap.close) bitmap.close();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+    return blob ? new File([blob], "photo.jpg", { type: "image/jpeg" }) : file;
+  } catch {
+    return file;
+  }
+}
+
 async function openFile(file) {
   if (!file) return;
   if (!file.type.startsWith("image/")) {
@@ -1304,7 +1655,7 @@ async function openFile(file) {
   setBusy(true);
   try {
     const form = new FormData();
-    form.append("file", file);
+    form.append("file", await shrinkPhoto(file));
     const response = await fetch("/api/sessions", { method: "POST", body: form });
     if (!response.ok) throw new Error(await readError(response));
     await adoptSession(await response.json(), false);
@@ -1331,11 +1682,20 @@ async function openSample() {
 function download() {
   if (!state.paintCanvas) return;
   if (state.paintDirty) rebuildPaint();
-  state.paintCanvas.toBlob((blob) => {
+  state.paintCanvas.toBlob(async (blob) => {
     if (!blob) return;
+    const file = new File([blob], "roomroller.png", { type: "image/png" });
+    if (touchQuery.matches && navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: "RoomRoller" });
+        return;
+      } catch (error) {
+        if (error.name === "AbortError") return;
+      }
+    }
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = "roomhue.png";
+    link.download = "roomroller.png";
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   }, "image/png");
@@ -1502,6 +1862,7 @@ function bind() {
     state.compare = Number($("compare").value) / 100;
     redraw();
   });
+  $("clear-color-finish").addEventListener("click", () => $("clear-color").click());
   $("clear-color").addEventListener("click", () => {
     const current = selected();
     if (!current || !current.color) return;
@@ -1509,7 +1870,7 @@ function bind() {
     current.color = null;
     state.paintDirty = true;
     renderSurfaces();
-    renderSwatches();
+    updateSwatchSelection();
     redraw();
   });
   $("apply-all").addEventListener("click", () => {
@@ -1526,7 +1887,7 @@ function bind() {
     });
     state.paintDirty = true;
     renderSurfaces();
-    renderSwatches();
+    updateSwatchSelection();
     redraw();
   });
   $("search").addEventListener("input", () => {
@@ -1574,6 +1935,7 @@ function bind() {
   }, { passive: false });
   view.addEventListener("pointerdown", onPointerDown);
   view.addEventListener("dblclick", (event) => {
+    if (state.lastPointerType !== "mouse") return;
     if (state.tool === "dots") {
       event.preventDefault();
       if (state.draft && state.draft.length >= 3) addWallFromDots();
@@ -1583,30 +1945,9 @@ function bind() {
       setZoom(state.zoom * (event.shiftKey ? 0.5 : 2), { x: event.clientX, y: event.clientY });
     }
   });
-  view.addEventListener("pointermove", (event) => {
-    state.zoomAnchor = { x: event.clientX, y: event.clientY };
-    moveBrushCursor(event);
-    if (state.panning && state.panOrigin) {
-      state.panX = state.panOrigin.panX + (event.clientX - state.panOrigin.x);
-      state.panY = state.panOrigin.panY + (event.clientY - state.panOrigin.y);
-      fit();
-      return;
-    }
-    if (!state.painting) return;
-    const point = eventPoint(event);
-    stroke(state.lastPoint, point);
-    state.lastPoint = point;
-  });
-  view.addEventListener("pointerup", () => {
-    if (state.panning) {
-      state.panning = false;
-      view.style.cursor = state.spaceDown ? "grab" : state.tool === "select" || state.tool === "wand" || state.tool === "dots" ? "crosshair" : "none";
-    }
-    const wasPainting = state.painting;
-    state.painting = false;
-    state.lastPoint = null;
-    if (wasPainting) redraw();
-  });
+  view.addEventListener("pointermove", onPointerMove);
+  view.addEventListener("pointerup", onPointerUp);
+  view.addEventListener("pointercancel", onPointerUp);
   $("stage").addEventListener("pointerleave", () => {
     $("brush-cursor").style.opacity = "0";
   });
@@ -1639,7 +1980,8 @@ function bind() {
     const current = document.querySelector(".panel").getBoundingClientRect().width;
     const limits = panelLimits();
     if (current > limits.max) setPanelWidth(limits.max, false);
-    fit();
+    if (isMobile()) setSheet(state.sheet);
+    scheduleFit();
     if ($("fold-mix").open) sizePicker();
   });
   document.addEventListener("keydown", (event) => {
@@ -1699,9 +2041,149 @@ function bind() {
   });
 }
 
+function isMobile() {
+  return mobileQuery.matches;
+}
+
+function sheetStops() {
+  const height = window.innerHeight;
+  return { peek: 116, half: Math.round(height * 0.5), full: Math.round(height * 0.84) };
+}
+
+function setSheet(name) {
+  state.sheet = name;
+  document.querySelector(".panel").style.setProperty("--sheet", `${sheetStops()[name]}px`);
+}
+
+function revealSheet() {
+  if (isMobile() && state.sheet === "peek") setSheet("half");
+}
+
+function setSheetTab(id) {
+  state.sheetTab = id;
+  document.querySelectorAll(".panel > .fold").forEach((fold) => {
+    const on = fold.id === id;
+    fold.classList.toggle("is-tab", on);
+    if (on) fold.open = true;
+  });
+  document.querySelectorAll("[data-sheet]").forEach((button) => {
+    button.setAttribute("aria-selected", String(button.dataset.sheet === id));
+  });
+  if (id === "fold-mix") requestAnimationFrame(sizePicker);
+}
+
+function syncMobile() {
+  const panel = document.querySelector(".panel");
+  if (isMobile()) {
+    setSheetTab(state.sheetTab);
+    setSheet(state.sheet);
+  } else {
+    panel.style.removeProperty("--sheet");
+    document.querySelectorAll(".panel > .fold").forEach((fold) => fold.classList.remove("is-tab"));
+    toggleMenu(false);
+  }
+  scheduleFit();
+}
+
+function toggleMenu(open) {
+  const top = document.querySelector(".top");
+  const next = open == null ? !top.classList.contains("menu-open") : open;
+  top.classList.toggle("menu-open", next);
+  $("menu-btn").setAttribute("aria-expanded", String(next));
+  if (next && !state.user) renderGoogleButton($("account-google"), "signin");
+}
+
+function bindMobile() {
+  $("m-open").addEventListener("click", () => $("file").click());
+  $("menu-btn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleMenu();
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("#top-actions") && !event.target.closest("#menu-btn")) toggleMenu(false);
+  });
+  $("top-actions").addEventListener("click", (event) => {
+    if (isMobile() && event.target.closest("button:not(#signout-btn)")) toggleMenu(false);
+  });
+  document.querySelectorAll("[data-sheet]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setSheetTab(button.dataset.sheet);
+      revealSheet();
+    });
+  });
+  document.querySelectorAll(".panel > .fold > summary").forEach((summary) => {
+    summary.addEventListener("click", (event) => {
+      if (isMobile()) event.preventDefault();
+    });
+  });
+
+  const panel = document.querySelector(".panel");
+  const handle = $("sheet-handle");
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    const startY = event.clientY;
+    const startHeight = panel.getBoundingClientRect().height;
+    const stops = sheetStops();
+    let moved = false;
+    panel.classList.add("is-dragging");
+    const move = (pointer) => {
+      const dy = pointer.clientY - startY;
+      if (Math.abs(dy) > 6) moved = true;
+      const height = Math.min(stops.full, Math.max(stops.peek, startHeight - dy));
+      panel.style.setProperty("--sheet", `${height}px`);
+    };
+    const up = (pointer) => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      panel.classList.remove("is-dragging");
+      if (!moved) {
+        setSheet(state.sheet === "full" ? "half" : state.sheet === "half" ? "full" : "half");
+        return;
+      }
+      const height = Math.min(stops.full, Math.max(stops.peek, startHeight - (pointer.clientY - startY)));
+      const nearest = Object.entries(stops).sort((a, b) => Math.abs(a[1] - height) - Math.abs(b[1] - height))[0][0];
+      setSheet(nearest);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  });
+  handle.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setSheet(state.sheet === "full" ? "half" : "full");
+    }
+  });
+
+  const hold = $("hold-compare");
+  const showBefore = (event) => {
+    event.preventDefault();
+    hold.classList.add("is-on");
+    state.compare = 0;
+    redraw();
+  };
+  const showAfter = () => {
+    if (!hold.classList.contains("is-on")) return;
+    hold.classList.remove("is-on");
+    state.compare = Number($("compare").value) / 100;
+    redraw();
+  };
+  hold.addEventListener("pointerdown", showBefore);
+  ["pointerup", "pointercancel", "pointerleave"].forEach((name) => hold.addEventListener(name, showAfter));
+  hold.addEventListener("contextmenu", (event) => event.preventDefault());
+
+  if (window.ResizeObserver) new ResizeObserver(() => scheduleFit()).observe($("stage"));
+  mobileQuery.addEventListener("change", syncMobile);
+  if (touchQuery.matches) $("empty-title").textContent = "Start with a photo of your room.";
+  syncMobile();
+}
+
 async function boot() {
   bindPanel();
   bind();
+  bindMobile();
   renderRecent();
   syncLineButtons();
   if ($("fold-mix").open) sizePicker();

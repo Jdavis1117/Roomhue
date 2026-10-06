@@ -1,4 +1,4 @@
-"""Server for Roomhue. Photos are decoded in this process; saved rooms belong to a Google account."""
+"""Server for RoomRoller. Photos are decoded in this process; saved rooms belong to a Google account."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ MAX_SESSIONS = 6
 
 auth.load_env_file()
 
-app = FastAPI(title="Roomhue", docs_url=None, redoc_url=None)
+app = FastAPI(title="RoomRoller", docs_url=None, redoc_url=None)
 app.add_middleware(
     SessionMiddleware,
     secret_key=auth.session_secret(),

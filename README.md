@@ -1,4 +1,4 @@
-# Roomhue
+# RoomRoller
 
 Try paint colors on a photo of a room before buying a can. Sign in with Google to keep rooms in your collection.
 
@@ -33,9 +33,9 @@ Photos are decoded in this process and scaled so the long edge is at most 1400 p
 Sign-in needs an OAuth client ID from Google. It is free and takes a few minutes.
 
 1. Open https://console.cloud.google.com/apis/credentials and choose a project (or create one).
-2. If asked, set up the consent screen: External, app name Roomhue, your email as support and developer contact.
+2. If asked, set up the consent screen: External, app name RoomRoller, your email as support and developer contact.
 3. Create credentials > OAuth client ID > Web application.
-4. Under Authorized JavaScript origins add `http://localhost`, `http://localhost:8765`, and the published app's address (for example `https://roomhue.replit.app`). No redirect URIs are needed.
+4. Under Authorized JavaScript origins add `http://localhost`, `http://localhost:8765`, and the published app's address (for example `https://roomroller.replit.app`). No redirect URIs are needed.
 5. Copy the client ID. For local runs, put it in a `.env` file in this folder:
 
    ```

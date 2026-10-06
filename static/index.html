@@ -2,8 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Roomhue</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#fffcf8" />
+  <title>RoomRoller</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23f4f0ea'/%3E%3Cpath d='M6 22 V12 L16 6 L26 12 V22 H6Z' fill='none' stroke='%23c45c26' stroke-width='2'/%3E%3Crect x='13' y='16' width='6' height='6' fill='%23c45c26'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
@@ -13,11 +14,15 @@
       <div class="brand">
         <span class="mark" aria-hidden="true"></span>
         <div>
-          <h1>Roomhue</h1>
+          <h1>RoomRoller</h1>
           <p>Try paint on a photo of the room.</p>
         </div>
       </div>
-      <div class="top-actions">
+      <div class="mobile-actions">
+        <button type="button" id="m-open" class="solid-btn">Open photo</button>
+        <button type="button" id="menu-btn" class="icon-btn" aria-label="Menu" aria-expanded="false" aria-controls="top-actions"><span></span><span></span><span></span></button>
+      </div>
+      <div class="top-actions" id="top-actions">
         <button type="button" id="collection-btn" class="text-btn">Collection</button>
         <button type="button" id="save-btn" class="text-btn" disabled>Save</button>
         <button type="button" id="sample-btn" class="text-btn">Sample room</button>
@@ -39,8 +44,8 @@
     <main>
       <section class="stage-wrap" id="drop">
         <div id="empty" class="empty">
-          <p class="eyebrow">Local preview</p>
-          <h2>Drop a room photo here.</h2>
+          <p class="eyebrow">Paint preview</p>
+          <h2 id="empty-title">Drop a room photo here.</h2>
           <p class="lede">Walls are marked when the photo opens, and you can place dots to add another wall. The light in the photo stays. Sign in with Google to keep rooms in your collection.</p>
           <div class="empty-actions">
             <button type="button" id="empty-open" class="solid-btn">Browse photos</button>
@@ -52,6 +57,7 @@
         <div id="studio" class="studio" hidden>
           <div id="stage" class="stage">
             <canvas id="view"></canvas>
+            <button type="button" id="hold-compare" class="hold-compare">Hold for before</button>
             <div id="brush-cursor" class="brush-cursor" hidden></div>
           </div>
           <div class="toolbar">
@@ -99,6 +105,13 @@
 
       <aside class="panel">
         <div id="panel-resize" class="panel-resize" role="separator" aria-orientation="vertical" aria-label="Drag to resize the color pane" tabindex="0"></div>
+        <div id="sheet-handle" class="sheet-handle" role="button" tabindex="0" aria-label="Drag to resize the panel"><span></span></div>
+        <nav id="sheet-tabs" class="sheet-tabs" role="tablist" aria-label="Panels">
+          <button type="button" role="tab" data-sheet="fold-brands">Colors</button>
+          <button type="button" role="tab" data-sheet="fold-surfaces">Walls</button>
+          <button type="button" role="tab" data-sheet="fold-finish">Finish</button>
+          <button type="button" role="tab" data-sheet="fold-mix">Mix</button>
+        </nav>
 
         <details class="fold" id="fold-surfaces">
           <summary>
@@ -129,6 +142,7 @@
               <input id="shade" type="range" min="-15" max="15" value="0" />
             </label>
             <button type="button" id="apply-all" class="text-btn" disabled>Apply this color to every wall</button>
+            <button type="button" id="clear-color-finish" class="text-btn mobile-only" disabled>Remove the color from this surface</button>
           </div>
         </details>
 
