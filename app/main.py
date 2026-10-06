@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import os
 import threading
@@ -13,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
@@ -190,9 +191,18 @@ def _payload(session_id: str, image: np.ndarray, surfaces: list[Surface]) -> dic
     }
 
 
+def _versioned(html: str) -> str:
+    """Tag app.js and styles.css with a hash of their contents so browsers never run a stale copy."""
+    for name in ("app.js", "styles.css"):
+        digest = hashlib.sha256((STATIC / name).read_bytes()).hexdigest()[:10]
+        html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={digest}"')
+    return html
+
+
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+def index() -> HTMLResponse:
+    html = _versioned((STATIC / "index.html").read_text(encoding="utf-8"))
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/colors")

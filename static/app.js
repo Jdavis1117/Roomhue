@@ -1809,7 +1809,14 @@ function askSignIn(next) {
   }
   state.afterSignIn = next;
   $("signin").hidden = false;
+  $("signin-problem").hidden = true;
   renderGoogleButton($("signin-button"), "signin_with");
+  clearTimeout(askSignIn.timer);
+  askSignIn.timer = setTimeout(() => {
+    if ($("signin").hidden || $("signin-button").querySelector("iframe")) return;
+    $("signin-problem").textContent = `Google's sign-in button didn't load here. Add ${window.location.origin} to the Authorized JavaScript origins of the Google client, then reload.`;
+    $("signin-problem").hidden = false;
+  }, 4000);
 }
 
 async function checkSignedIn(response, next) {

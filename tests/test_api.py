@@ -77,6 +77,8 @@ def test_colors_and_index():
     page = client.get("/")
     assert page.status_code == 200
     assert "Roomhue" in page.text
+    assert page.headers["cache-control"] == "no-cache"
+    assert '"/static/app.js?v=' in page.text and '"/static/styles.css?v=' in page.text
 
 
 def test_lines_split_the_photo():
