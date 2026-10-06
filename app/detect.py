@@ -449,7 +449,71 @@ def _append_surface(
     )
 
 
+def _seal_seams(surfaces: list[Surface], radius: int = 8) -> None:
+    """Close the unlabeled crack between surfaces.
+
+    Corners and baseboards are cut out so two walls stay selectable on their
+    own. That cut is wide enough to show the photo between two painted walls.
+    Closing the combined mask bridges the crack and nothing wider, so a window
+    or sofa stays open. Each new pixel goes to the nearer surface.
+    """
+    if len(surfaces) < 2:
+        return
+    height, width = surfaces[0].mask.shape
+    labels = np.zeros((height, width), np.int32)
+    for index, surface in enumerate(surfaces, start=1):
+        labels[surface.mask > 0] = index
+    if int(labels.max()) == 0:
+        return
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+    union = np.where(labels > 0, 255, 0).astype(np.uint8)
+    closed = cv2.morphologyEx(union, cv2.MORPH_CLOSE, kernel)
+    added = (closed > 0) & (labels == 0)
+    if not np.any(added):
+        return
+
+    nearest = np.full((height, width), np.float32(1e6), dtype=np.float32)
+    second = np.full((height, width), np.float32(1e6), dtype=np.float32)
+    owner = np.zeros((height, width), np.int32)
+    for index, surface in enumerate(surfaces, start=1):
+        inv = np.where(surface.mask > 0, 0, 255).astype(np.uint8)
+        dist = cv2.distanceTransform(inv, cv2.DIST_L2, 5)
+        closer = dist < nearest
+        second = np.where(closer, nearest, second)
+        owner = np.where(closer, index, owner)
+        nearest = np.where(closer, dist, nearest)
+        between = (~closer) & (dist < second)
+        second = np.where(between, dist, second)
+
+    # A pixel belongs in the crack only when a second surface is nearby.
+    # A hole inside one wall (a window, a picture) fails that test and stays empty.
+    seam = added & (owner > 0) & (second <= float(radius * 2))
+    if not np.any(seam):
+        return
+    ys, xs = np.where(seam)
+    owners = owner[ys, xs]
+    claimed: set[int] = set()
+    for index, surface in enumerate(surfaces, start=1):
+        chosen = owners == index
+        if not np.any(chosen):
+            continue
+        surface.mask[ys[chosen], xs[chosen]] = 255
+        claimed.add(index)
+    for index in claimed:
+        _refresh_geometry(surfaces[index - 1])
+
+
+def _refresh_geometry(surface: Surface) -> None:
+    height, width = surface.mask.shape
+    ys, xs = np.where(surface.mask > 0)
+    if len(ys) == 0:
+        return
+    surface.centroid = (float(xs.mean() / width), float(ys.mean() / height))
+    surface.area_ratio = float(len(ys) / float(height * width))
+
+
 def _sort_surfaces(surfaces: list[Surface]) -> list[Surface]:
+    _seal_seams(surfaces)
     kind_order = {"ceiling": 0, "wall": 1, "floor": 2}
     surfaces.sort(key=lambda surface: (kind_order.get(surface.kind, 9), surface.centroid[0]))
     return surfaces
