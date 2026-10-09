@@ -291,6 +291,7 @@ function setConsent(preferences) {
     if (!state.user && state.favorites.length) localStorage.setItem(FAVORITES_KEY, JSON.stringify(state.favorites));
   }
   $("consent").hidden = true;
+  if (state.installTipWanted && !sessionStorage.getItem(INSTALL_KEY)) $("install-tip").hidden = false;
 }
 
 function showConsent() {
@@ -2900,7 +2901,71 @@ function bindMobile() {
   syncMobile();
 }
 
+const INSTALL_KEY = "roomroller-install-tip";
+
+function installed() {
+  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+
+function showInstallTip() {
+  // One thing at a time: wait until the cookie banner has been answered.
+  state.installTipWanted = true;
+  if (consent()) $("install-tip").hidden = false;
+}
+
+function setUpApp() {
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      // The site works the same without it; it only makes the installed app start faster.
+    });
+  }
+  if (installed()) {
+    document.body.classList.add("is-installed");
+    return;
+  }
+  const dismissed = sessionStorage.getItem(INSTALL_KEY) || (preferencesAllowed() && localStorage.getItem(INSTALL_KEY));
+  if (dismissed || !touchQuery.matches) return;
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const safari = ios && /Safari/.test(navigator.userAgent) && !/CriOS|FxiOS|EdgiOS|GSA/.test(navigator.userAgent);
+  if (safari) {
+    // iPhones don't let sites show an install button, so explain the two taps.
+    $("install-text").innerHTML = "";
+    $("install-text").append(
+      "Get the app: tap ",
+      Object.assign(document.createElement("strong"), { textContent: "Share" }),
+      " then ",
+      Object.assign(document.createElement("strong"), { textContent: "Add to Home Screen" }),
+      ".",
+    );
+    showInstallTip();
+  }
+  window.addEventListener("beforeinstallprompt", (event) => {
+    // Android and desktop Chrome can install with one tap.
+    event.preventDefault();
+    state.installPrompt = event;
+    $("install-text").textContent = "Add RoomRoller to your home screen for quick access.";
+    $("install-btn").hidden = false;
+    showInstallTip();
+  });
+  $("install-btn").addEventListener("click", async () => {
+    if (!state.installPrompt) return;
+    state.installPrompt.prompt();
+    await state.installPrompt.userChoice.catch(() => null);
+    state.installPrompt = null;
+    $("install-tip").hidden = true;
+  });
+  $("install-close").addEventListener("click", () => {
+    $("install-tip").hidden = true;
+    sessionStorage.setItem(INSTALL_KEY, "dismissed");
+    if (preferencesAllowed()) localStorage.setItem(INSTALL_KEY, "dismissed");
+  });
+  window.addEventListener("appinstalled", () => {
+    $("install-tip").hidden = true;
+  });
+}
+
 async function boot() {
+  setUpApp();
   bindPanel();
   bind();
   bindMobile();

@@ -321,6 +321,26 @@ def _versioned(html: str) -> str:
     return html
 
 
+def _app_version() -> str:
+    digest = hashlib.sha256()
+    for name in ("index.html", "app.js", "styles.css", "sw.js"):
+        digest.update((STATIC / name).read_bytes())
+    return digest.hexdigest()[:12]
+
+
+@app.get("/sw.js")
+def service_worker() -> Response:
+    # Served from the site root so it can make the installed app start offline.
+    # Its version changes with every deploy, which tells phones to fetch the new app.
+    script = (STATIC / "sw.js").read_text(encoding="utf-8").replace("__VERSION__", _app_version())
+    return Response(script, media_type="text/javascript", headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+
+
+@app.get("/manifest.webmanifest")
+def manifest() -> FileResponse:
+    return FileResponse(STATIC / "manifest.webmanifest", media_type="application/manifest+json", headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/")
 def index() -> HTMLResponse:
     html = _versioned((STATIC / "index.html").read_text(encoding="utf-8"))

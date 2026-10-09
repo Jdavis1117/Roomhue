@@ -575,3 +575,30 @@ def test_rooms_can_be_renamed(signed_in):
     assert browser.patch(f"/api/collection/{room_id}", json={"name": ""}).status_code == 422
     assert browser.patch(f"/api/collection/{room_id}", json={"name": "x" * 201}).status_code == 422
     assert TestClient(app).patch(f"/api/collection/{room_id}", json={"name": "Nope"}).status_code == 401
+
+
+def test_home_screen_app_files_are_served():
+    manifest = client.get("/manifest.webmanifest")
+    assert manifest.headers["content-type"].startswith("application/manifest+json")
+    body = manifest.json()
+    assert body["display"] == "standalone" and body["start_url"].startswith("/")
+    assert any(icon.get("purpose") == "maskable" for icon in body["icons"])
+    for icon in body["icons"]:
+        assert client.get(icon["src"]).status_code == 200
+    worker = client.get("/sw.js")
+    assert worker.headers["content-type"].startswith("text/javascript")
+    assert worker.headers["cache-control"] == "no-cache"
+    assert "__VERSION__" not in worker.text and "roomroller-" in worker.text
+
+
+def test_service_worker_version_changes_when_the_app_changes(monkeypatch, tmp_path):
+    import shutil
+
+    from app import main
+
+    first = client.get("/sw.js").text
+    copy = tmp_path / "static"
+    shutil.copytree(main.STATIC, copy)
+    (copy / "app.js").write_text((copy / "app.js").read_text(encoding="utf-8") + "\n// changed", encoding="utf-8")
+    monkeypatch.setattr(main, "STATIC", copy)
+    assert client.get("/sw.js").text != first

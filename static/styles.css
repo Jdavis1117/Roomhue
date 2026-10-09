@@ -690,6 +690,23 @@ kbd {
 }
 .agree input { width: 20px; height: 20px; margin: 1px 0 0; accent-color: var(--accent); flex: 0 0 auto; }
 .collection-foot { margin: 16px 0 0; font-size: 0.84rem; }
+.install-tip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+.install-tip img { border-radius: 10px; flex: 0 0 auto; }
+.install-tip p { margin: 0; flex: 1; font-size: 0.9rem; }
+.install-tip .link-btn { color: var(--muted); font-size: 0.85rem; }
+@media (display-mode: standalone) {
+  body { -webkit-user-select: none; user-select: none; }
+  input, textarea { -webkit-user-select: text; user-select: text; }
+}
 .paint-cell { position: relative; min-width: 0; }
 .fav {
   position: absolute;
