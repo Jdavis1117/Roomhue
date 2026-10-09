@@ -811,7 +811,7 @@ body:not(.signed-in) .collection-foot { display: none; }
 }
 
 .mobile-actions, .sheet-handle, .sheet-tabs, .hold-compare, .mobile-only,
-.photo-history, .photo-edit, .photo-compare, .brand-select, .group-chips { display: none; }
+.photo-history, .photo-edit, .photo-compare, .photo-all, .brand-select, .group-chips { display: none; }
 
 @media (max-width: 900px) {
   html, body { height: 100%; }
@@ -977,6 +977,21 @@ body:not(.signed-in) .collection-foot { display: none; }
     font-weight: 600;
   }
   #compare-btn { display: none; }
+  .photo-all {
+    display: inline-flex;
+    align-items: center;
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    z-index: 2;
+    min-height: 38px;
+    padding: 8px 14px;
+    background: var(--ink);
+    color: #f7f3ee;
+    font-size: 0.86rem;
+    font-weight: 600;
+  }
+  .photo-all[hidden] { display: none; }
   .compare-overlay .compare-card { height: 100dvh; max-height: 100dvh; border-radius: 0; padding-top: calc(14px + env(safe-area-inset-top)); }
   .compare-grid { grid-template-columns: 1fr; }
   .share-link input { font-size: 16px; }

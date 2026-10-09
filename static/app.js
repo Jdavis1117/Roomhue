@@ -950,6 +950,7 @@ function renderSurfaces() {
     list.appendChild(item);
   });
   const current = selected();
+  syncAllWallsButton();
   $("clear-color").disabled = !current || !current.color;
   $("clear-color-finish").disabled = !current || !current.color;
   $("apply-all").disabled = !current || !current.color;
@@ -1555,13 +1556,18 @@ function otherWalls(current) {
   );
 }
 
+function syncAllWallsButton() {
+  // Phones keep a Paint all walls button on the photo whenever it would change something.
+  const current = selected();
+  $("m-all-walls").hidden = !(current && current.kind === "wall" && current.color && otherWalls(current).length);
+}
+
 function offerAllWalls(current, label) {
   // Right after a wall gets a color, offer the same color for the rest of the walls.
+  // Phones have a button on the photo instead, and nothing pops up over the room.
   const name = currentColorChoice(current).name;
-  if (current.kind === "wall" && otherWalls(current).length) {
+  if (!isMobile() && current.kind === "wall" && otherWalls(current).length) {
     showSnack(`${name} on ${current.name}`, "Paint all walls", applyToAllWalls);
-  } else if (isMobile() && label) {
-    toast(label);
   }
 }
 
@@ -2512,6 +2518,7 @@ function bind() {
     redraw();
   });
   $("apply-all").addEventListener("click", applyToAllWalls);
+  $("m-all-walls").addEventListener("click", applyToAllWalls);
   $("snack-action").addEventListener("click", () => {
     const action = state.snackAction;
     hideSnack();
