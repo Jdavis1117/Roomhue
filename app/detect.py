@@ -1,12 +1,14 @@
 """Find paintable surfaces in a room photo.
 
-Walls, ceiling, and floor are large, fairly even regions. Corners are treated
-as hard edges so two walls painted the same color can still be selected
-separately. Furniture, windows, and pictures are left out when they look
-small, bright, or interior.
+`detect_surfaces` first asks the scene-parsing network in app/segment.py which
+pixels are wall, ceiling, and floor. That keeps furniture, windows, doors,
+curtains, and art out of the masks. The wall area is then split into separate
+walls at the room's corners, found from long near-vertical lines inside the
+wall area and from kinks in the ceiling and floor lines. Every wall pixel ends
+up in exactly one wall, so neighbouring walls meet without a gap.
 
-This is a classical detector with a single entry point, `detect_surfaces`,
-so a learned segmenter can replace the body later without changing the app.
+If the network isn't available, the older color-and-edge detector below
+(`_classic_surfaces`) runs instead.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+from app import segment
 
 MAX_EDGE = 1400
 CLUSTER_EDGE = 520
@@ -398,7 +402,14 @@ def detect_surfaces(bgr: np.ndarray) -> list[Surface]:
     height, width = bgr.shape[:2]
     if height < 32 or width < 32:
         return []
+    probs = segment.surface_probabilities(bgr)
+    if probs is None:
+        return _classic_surfaces(bgr)
+    return _semantic_surfaces(bgr, probs)
 
+
+def _classic_surfaces(bgr: np.ndarray) -> list[Surface]:
+    height, width = bgr.shape[:2]
     smooth = cv2.bilateralFilter(bgr, 9, 55, 55)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     regions = _split_on_structure(_merge(_segment(bgr), smooth), gray)
@@ -417,6 +428,362 @@ def detect_surfaces(bgr: np.ndarray) -> list[Surface]:
         for piece in _peel_ceiling(mask, gray):
             _append_surface(surfaces, piece, lab, gray, height, width)
     return _sort_surfaces(surfaces)
+
+
+# ---------------------------------------------------------------- learned path
+
+
+def _keep_large(mask: np.ndarray, min_area: float) -> np.ndarray:
+    """Drop specks and tiny islands; fill pinholes left by noise."""
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    count, components, stats, _centroids = cv2.connectedComponentsWithStats(mask)
+    kept = np.zeros_like(mask)
+    for index in range(1, count):
+        if stats[index, cv2.CC_STAT_AREA] >= min_area:
+            kept[components == index] = 255
+    holes = cv2.connectedComponentsWithStats(np.where(kept > 0, 0, 255).astype(np.uint8))
+    hole_limit = mask.size * 0.0004
+    for index in range(1, holes[0]):
+        if holes[2][index, cv2.CC_STAT_AREA] <= hole_limit:
+            x, y, w, h = holes[2][index, :4]
+            if x > 0 and y > 0 and x + w < mask.shape[1] and y + h < mask.shape[0]:
+                kept[holes[1] == index] = 255
+    return kept
+
+
+def _boundary_line(wall: np.ndarray, classes: np.ndarray, neighbour: int, from_top: bool) -> np.ndarray:
+    """Per column, the y where the wall meets the ceiling (or floor), or -1 where it doesn't."""
+    height, width = wall.shape
+    on = wall > 0
+    any_wall = on.any(axis=0)
+    first = np.argmax(on, axis=0) if from_top else height - 1 - np.argmax(on[::-1], axis=0)
+    probe = np.clip(first - 3 if from_top else first + 3, 0, height - 1)
+    touches = any_wall & (classes[probe, np.arange(width)] == neighbour)
+    touches &= (first - 3 >= 0) if from_top else (first + 3 < height)
+    return np.where(touches, first, -1)
+
+
+def _runs_straight(line: np.ndarray, x: float, width: int, height: int) -> bool:
+    """True when a ceiling or floor line is visible on both sides of x and doesn't bend there."""
+    reach, gap = int(width * 0.08), int(width * 0.012)
+    sides = []
+    for lo, hi in ((int(x) - reach, int(x) - gap), (int(x) + gap, int(x) + reach)):
+        xs = np.arange(max(0, lo), min(width, hi))
+        if len(xs) < reach * 0.5:
+            return False
+        ys = line[xs]
+        keep = ys >= 0
+        if keep.mean() < 0.7:
+            return False
+        sides.append(np.polyfit(xs[keep], ys[keep].astype(np.float64), 1))
+    (slope_a, icpt_a), (slope_b, icpt_b) = sides
+    turn = abs(np.degrees(np.arctan(slope_a) - np.arctan(slope_b)))
+    step = abs((slope_a * x + icpt_a) - (slope_b * x + icpt_b))
+    return turn < 4.0 and step < height * 0.01
+
+
+def _boundary_kinks(wall: np.ndarray, classes: np.ndarray, neighbour: int, from_top: bool) -> list[tuple[float, float, float]]:
+    """x positions where the wall's edge against the ceiling (or floor) changes direction.
+
+    A room corner meets the ceiling line at a kink, so these mark where walls
+    turn even when the corner itself is too faint to see.
+    """
+    height, width = wall.shape
+    step = 3
+    points: list[tuple[int, int]] = []
+    for x in range(0, width, 2):
+        column = wall[:, x] > 0
+        if not column.any():
+            points.append((x, -1))
+            continue
+        y = int(np.argmax(column)) if from_top else int(height - 1 - np.argmax(column[::-1]))
+        probe = y - step if from_top else y + step
+        if 0 <= probe < height and classes[probe, x] == neighbour:
+            points.append((x, y))
+        else:
+            points.append((x, -1))
+    kinks: list[tuple[float, float, float]] = []
+    run: list[tuple[int, int]] = []
+    min_segment = width * 0.04
+    for point in points + [(width, -1)]:
+        if point[1] >= 0:
+            run.append(point)
+            continue
+        if len(run) >= 8:
+            curve = np.array(run, np.int32).reshape(-1, 1, 2)
+            simple = cv2.approxPolyDP(curve, max(2.0, height * 0.006), False).reshape(-1, 2)
+            for i in range(1, len(simple) - 1):
+                a, b, c = simple[i - 1], simple[i], simple[i + 1]
+                if np.hypot(*(b - a)) < min_segment or np.hypot(*(c - b)) < min_segment:
+                    continue
+                turn = abs(np.degrees(np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(b[1] - a[1], b[0] - a[0])))
+                turn = min(turn, 360 - turn)
+                if turn >= 9:
+                    kinks.append((float(b[0]), float(b[1]), float(turn)))
+        run = []
+    return kinks
+
+
+def _corner_lines(wall: np.ndarray, classes: np.ndarray, gray: np.ndarray, lab: np.ndarray) -> list[tuple[float, float]]:
+    """Corners between walls as lines x = x0 + slope * y, in image coordinates."""
+    height, width = wall.shape
+    inside = wall > 0
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 18, 54)
+    edges[cv2.dilate(wall, np.ones((9, 9), np.uint8)) == 0] = 0
+    faint = cv2.Canny(blur, 8, 24)
+    support_map = cv2.dilate(faint, np.ones((5, 5), np.uint8)) > 0
+    segments = cv2.HoughLinesP(
+        edges, 1, np.pi / 360, threshold=30, minLineLength=int(height * 0.08), maxLineGap=int(height * 0.025)
+    )
+    top_kinks = _boundary_kinks(wall, classes, segment.CEILING, True)
+    bottom_kinks = _boundary_kinks(wall, classes, segment.FLOOR, False)
+    kinks = [x for x, _y, _turn in top_kinks + bottom_kinks]
+    sharp = [x for x, _y, turn in top_kinks + bottom_kinks if turn >= 18]
+
+    # A corner bends both the ceiling line and the floor line; joining the two bends gives the corner itself.
+    paired: list[tuple[float, float]] = []
+    for tx, ty, _turn in top_kinks:
+        near = [(abs(bx - tx), bx, by) for bx, by, _bturn in bottom_kinks if abs(bx - tx) < width * 0.08 and by - ty > height * 0.2]
+        if near:
+            _gap, bx, by = min(near)
+            slope = (bx - tx) / (by - ty)
+            paired.append((tx - slope * ty, slope))
+
+    candidates: list[tuple[float, float]] = list(paired)
+    if segments is not None:
+        for x1, y1, x2, y2 in np.asarray(segments).reshape(-1, 4):
+            if abs(y2 - y1) < 1 or abs(x2 - x1) / abs(y2 - y1) > 0.36:  # within ~20 degrees of vertical
+                continue
+            slope = (x2 - x1) / float(y2 - y1)
+            candidates.append((x1 - slope * y1, slope))
+    for kink in kinks:
+        candidates.append((kink, 0.0))
+    paired_mids = [x0 + slope * height / 2 for x0, slope in paired]
+    ceiling_line = _boundary_line(wall, classes, segment.CEILING, True)
+    floor_line = _boundary_line(wall, classes, segment.FLOOR, False)
+
+    # Merge near-duplicates, keeping the first (Hough lines come strongest first).
+    merged: list[tuple[float, float]] = []
+    for x0, slope in candidates:
+        mid = x0 + slope * height / 2
+        if any(abs(mid - (m0 + ms * height / 2)) < width * 0.015 and abs(slope - ms) < 0.08 for m0, ms in merged):
+            continue
+        merged.append((x0, slope))
+
+    margin = max(4, round(width * 0.012))
+    offset = max(5, round(width * 0.008))
+    band = max(8, round(width * 0.02))
+    ys = np.arange(0, height, 2)
+    scored: list[tuple[float, float, float]] = []
+    for x0, slope in merged:
+        xs = np.round(x0 + slope * ys).astype(int)
+        valid = (xs >= margin) & (xs < width - margin)
+        if valid.sum() < 10:
+            continue
+        line_y, line_x = ys[valid], xs[valid]
+        on_wall = inside[line_y, line_x]
+        left_x = np.clip(line_x - offset, 0, width - 1)
+        right_x = np.clip(line_x + offset, 0, width - 1)
+        interior = on_wall & inside[line_y, left_x] & inside[line_y, right_x]
+        # Along a window, door, or picture frame one side of the line isn't wall; along a corner both sides are.
+        skirting = float((on_wall & ~interior).sum()) / max(1, int(on_wall.sum()))
+        # A corner runs through the middle of the wall area; a door or window frame runs along its edge.
+        if interior.sum() * 2 < height * 0.12:
+            continue
+        support = float(support_map[line_y[interior], line_x[interior]].mean())
+        side_l, side_r = [], []
+        for y, x in zip(line_y[interior], line_x[interior]):
+            for d in range(offset, offset + band, 3):
+                if x - d >= 0 and inside[y, x - d]:
+                    side_l.append(lab[y, x - d])
+                if x + d < width and inside[y, x + d]:
+                    side_r.append(lab[y, x + d])
+        if len(side_l) < 20 or len(side_r) < 20:
+            continue
+        ml = np.median(np.array(side_l, np.float32), axis=0)
+        mr = np.median(np.array(side_r, np.float32), axis=0)
+        contrast = float(np.sqrt(((ml - mr) * np.array([100 / 255, 1, 1])) ** 2 @ np.ones(3)))
+        top_x = x0 + slope * float(line_y[interior].min())
+        bottom_x = x0 + slope * float(line_y[interior].max())
+        mid = x0 + slope * height / 2
+        # With the camera roughly level, corners lean only from perspective, more toward the photo's sides.
+        lean_ok = abs(slope) <= 0.07 + 0.4 * abs(mid / width - 0.5)
+        kinked = any(abs(k - top_x) < width * 0.025 or abs(k - bottom_x) < width * 0.025 for k in kinks)
+        double = any(abs(m - mid) < width * 0.02 for m in paired_mids)
+        bent = any(abs(k - top_x) < width * 0.025 or abs(k - bottom_x) < width * 0.025 for k in sharp)
+        strong_line = (support >= 0.55 and contrast >= 3.0) or (support >= 0.8 and contrast >= 1.5)
+        # The ceiling and floor lines bend at a real corner; if either runs straight through, it isn't one.
+        straight = _runs_straight(ceiling_line, top_x, width, height) or _runs_straight(floor_line, bottom_x, width, height)
+        framed = skirting > 0.3 or not lean_ok or straight
+        if double or (not framed and (strong_line or (kinked and (contrast >= 2.0 or support >= 0.3)) or (bent and contrast >= 1.2))):
+            score = 3.0 * double + 2.0 * bent + 1.5 * strong_line + 1.0 * kinked + support + min(contrast, 20.0) / 10.0
+            scored.append((score, x0, slope))
+    # Corners are rarely within a few percent of the photo width of each other; keep the better-supported one.
+    accepted: list[tuple[float, float]] = []
+    for _score, x0, slope in sorted(scored, reverse=True):
+        if all(abs((x0 + slope * height / 2) - (a0 + a_s * height / 2)) > width * 0.09 for a0, a_s in accepted):
+            accepted.append((x0, slope))
+    return accepted
+
+
+def _split_walls(wall: np.ndarray, classes: np.ndarray, gray: np.ndarray, lab: np.ndarray) -> list[np.ndarray]:
+    height, width = wall.shape
+    if not wall.any():
+        return []
+    cut = np.zeros_like(wall)
+    corners = _corner_lines(wall, classes, gray, lab)
+    for x0, slope in corners:
+        top = (int(round(x0)), 0)
+        bottom = (int(round(x0 + slope * (height - 1))), height - 1)
+        cv2.line(cut, top, bottom, 255, 3)
+    pieces = np.where((wall > 0) & (cut == 0), 255, 0).astype(np.uint8)
+    count, components, stats, _centroids = cv2.connectedComponentsWithStats(pieces, connectivity=4)
+    min_piece = height * width * 0.01
+    seeds = np.zeros((height, width), np.int32)
+    next_id = 0
+    for index in range(1, count):
+        if stats[index, cv2.CC_STAT_AREA] >= min_piece:
+            next_id += 1
+            seeds[components == index] = next_id
+    if next_id == 0:
+        return []
+    # Give cut lines and slivers to the nearest wall so neighbouring walls meet without a gap.
+    _dist, nearest = cv2.distanceTransformWithLabels(
+        np.where(seeds > 0, 0, 255).astype(np.uint8), cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL
+    )
+    seed_ys, seed_xs = np.nonzero(seeds)
+    lookup = np.zeros(int(nearest.max()) + 1, np.int32)
+    # DIST_LABEL_PIXEL numbers the zero (seed) pixels in row-major order starting at 1.
+    order = np.argsort(seed_ys * width + seed_xs, kind="stable")
+    lookup[1 : len(order) + 1] = seeds[seed_ys[order], seed_xs[order]]
+    assigned = np.where(wall > 0, lookup[nearest], 0)
+    return _merge_same_face(assigned, next_id, corners, lab)
+
+
+def _merge_same_face(assigned: np.ndarray, count: int, corners: list[tuple[float, float]], lab: np.ndarray) -> list[np.ndarray]:
+    """Rejoin pieces of one wall that furniture or a window split apart.
+
+    Pieces between the same pair of corners are one wall face, unless their
+    paint clearly differs (a two-tone wall or a wall seen through a doorway).
+    """
+    height, width = assigned.shape
+    faces: dict[int, list[int]] = {}
+    medians: dict[int, np.ndarray] = {}
+    for wall_id in range(1, count + 1):
+        ys, xs = np.nonzero(assigned == wall_id)
+        if len(ys) == 0:
+            continue
+        cy, cx = float(ys.mean()), float(xs.mean())
+        face = sum(1 for x0, slope in corners if x0 + slope * cy < cx)
+        faces.setdefault(face, []).append(wall_id)
+        medians[wall_id] = np.median(lab[ys, xs].astype(np.float32), axis=0)
+    weights = np.array([0.5 * 100 / 255, 1.0, 1.0], np.float32)
+    masks = []
+    for members in faces.values():
+        groups: list[list[int]] = []
+        for wall_id in members:
+            for group in groups:
+                if float(np.linalg.norm((medians[group[0]] - medians[wall_id]) * weights)) < 9.0:
+                    group.append(wall_id)
+                    break
+            else:
+                groups.append([wall_id])
+        for group in groups:
+            masks.append(np.where(np.isin(assigned, group), 255, 0).astype(np.uint8))
+    return masks
+
+
+def _semantic_surfaces(bgr: np.ndarray, probs: np.ndarray) -> list[Surface]:
+    height, width = bgr.shape[:2]
+    area = height * width
+    classes = probs.argmax(axis=0).astype(np.uint8)
+    confidence = probs.max(axis=0)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    lab = cv2.cvtColor(cv2.bilateralFilter(bgr, 7, 40, 40), cv2.COLOR_BGR2LAB)
+
+    surfaces: list[Surface] = []
+
+    def add(kind: str, mask: np.ndarray) -> None:
+        on = mask > 0
+        if on.sum() < area * 0.01:
+            return
+        ys, xs = np.nonzero(on)
+        surfaces.append(
+            Surface(
+                kind=kind,
+                confidence=float(np.clip(confidence[on].mean(), 0, 0.99)),
+                mask=mask,
+                centroid=(float(xs.mean() / width), float(ys.mean() / height)),
+                area_ratio=float(on.mean()),
+            )
+        )
+
+    for kind, cls in (("ceiling", segment.CEILING), ("floor", segment.FLOOR)):
+        add(kind, _keep_large(np.where(classes == cls, 255, 0).astype(np.uint8), area * 0.012))
+    wall = _keep_large(np.where(classes == segment.WALL, 255, 0).astype(np.uint8), area * 0.006)
+    for piece in _split_walls(wall, classes, gray, lab):
+        add("wall", _fill_matching_holes(piece, lab, gray))
+    _close_gaps(surfaces, classes)
+    return _sort_surfaces(surfaces)
+
+
+def _fill_matching_holes(mask: np.ndarray, lab: np.ndarray, gray: np.ndarray) -> np.ndarray:
+    """Fill patches inside a wall that the network doubted but that look just like the wall.
+
+    Art, frames, switches, and vents differ in color or texture and stay out.
+    """
+    on = mask > 0
+    if not on.any():
+        return mask
+    height, width = mask.shape
+    weights = np.array([0.6 * 100 / 255, 1.0, 1.0], np.float32)
+    wall_color = np.median(lab[on].astype(np.float32), axis=0)
+    wall_texture = float(np.std(gray[cv2.erode(mask, np.ones((5, 5), np.uint8)) > 0])) if on.sum() > 100 else 255.0
+    holes = np.where(on, 0, 255).astype(np.uint8)
+    count, components, stats, _centroids = cv2.connectedComponentsWithStats(holes, connectivity=4)
+    filled = mask.copy()
+    limit = height * width * 0.03
+    for index in range(1, count):
+        x, y, w, h, area = stats[index]
+        if area > limit or x == 0 or y == 0 or x + w >= width or y + h >= height:
+            continue
+        hole = components == index
+        color = np.median(lab[hole].astype(np.float32), axis=0)
+        if float(np.linalg.norm((color - wall_color) * weights)) > 7.0:
+            continue
+        if float(np.std(gray[hole])) > max(10.0, wall_texture * 1.4):
+            continue
+        filled[hole] = 255
+    return filled
+
+
+def _close_gaps(surfaces: list[Surface], classes: np.ndarray) -> None:
+    """Hand thin unclaimed wall, ceiling, and floor pixels to the nearest surface."""
+    if not surfaces:
+        return
+    height, width = classes.shape
+    labels = np.zeros((height, width), np.int32)
+    for index, surface in enumerate(surfaces, start=1):
+        labels[surface.mask > 0] = index
+    open_px = (labels == 0) & (classes != segment.OTHER)
+    if not open_px.any():
+        return
+    distance, nearest = cv2.distanceTransformWithLabels(
+        np.where(labels > 0, 0, 255).astype(np.uint8), cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL
+    )
+    ys, xs = np.nonzero(labels)
+    lookup = np.zeros(int(nearest.max()) + 1, np.int32)
+    order = np.argsort(ys * width + xs, kind="stable")
+    lookup[1 : len(order) + 1] = labels[ys[order], xs[order]]
+    reach = max(3.0, max(height, width) * 0.006)
+    fill = open_px & (distance <= reach)
+    owner = lookup[nearest]
+    for index, surface in enumerate(surfaces, start=1):
+        grow = fill & (owner == index)
+        if grow.any():
+            surface.mask = np.where(grow | (surface.mask > 0), 255, 0).astype(np.uint8)
+            surface.area_ratio = float((surface.mask > 0).mean())
 
 
 def _append_surface(

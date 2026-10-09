@@ -9,6 +9,8 @@ const DELTA = 6 / 29;
 const RECENT_KEY = "roomhue-recent";
 const PANEL_KEY = "roomhue-panel-width";
 const CONSENT_KEY = "roomroller-consent";
+const FAVORITES_KEY = "roomroller-favorites";
+const FAVORITES = "Favorites";
 const GOOGLE_SCRIPT = "https://accounts.google.com/gsi/client";
 
 const state = {
@@ -35,6 +37,9 @@ const state = {
   legalVersion: "",
   googleReady: null,
   recentMemory: [],
+  favorites: [],
+  favoritesNoticed: false,
+  comparison: { scope: "walls", colors: [], token: 0 },
   afterSignIn: null,
   collectionName: "",
   tolerance: 16,
@@ -248,8 +253,10 @@ function setConsent(preferences) {
     state.recentMemory = loadRecent();
     localStorage.removeItem(RECENT_KEY);
     localStorage.removeItem(PANEL_KEY);
-  } else if (state.recentMemory.length) {
-    localStorage.setItem(RECENT_KEY, JSON.stringify(state.recentMemory));
+    localStorage.removeItem(FAVORITES_KEY);
+  } else {
+    if (state.recentMemory.length) localStorage.setItem(RECENT_KEY, JSON.stringify(state.recentMemory));
+    if (!state.user && state.favorites.length) localStorage.setItem(FAVORITES_KEY, JSON.stringify(state.favorites));
   }
   $("consent").hidden = true;
 }
@@ -396,6 +403,7 @@ async function adoptSession(payload, keepPhoto) {
   $("studio").hidden = false;
   $("export-btn").disabled = false;
   $("save-btn").disabled = false;
+  $("share-btn").disabled = false;
   $("add-surface").disabled = false;
   fit();
   requestAnimationFrame(fit);
@@ -501,7 +509,8 @@ function feather(surface) {
   return alpha;
 }
 
-function applySurface(data, surface, region) {
+function applySurface(acc, surface, region) {
+  // Adds this surface's paint, weighted by its soft edge, into the region's blend buffers.
   const paint = paintLab(surface.color, surface.shade);
   if (!paint) return;
   const alpha = feather(surface);
@@ -514,10 +523,10 @@ function applySurface(data, surface, region) {
   if (x0 >= x1 || y0 >= y1) return;
   const med = surfaceMedian(surface);
   const shine = SHEEN_AMOUNT[surface.sheen] || 0;
-  const src = state.lab.rgb;
-  for (let y = y0; y < y1; y += 1) for (let i = y * state.width + x0, end = y * state.width + x1; i < end; i += 1) {
-    const coverage = alpha[i] * surface.coverage;
-    if (coverage <= 0) continue;
+  const span = region.x1 - region.x0;
+  for (let y = y0; y < y1; y += 1) for (let i = y * state.width + x0, end = y * state.width + x1, j = (y - region.y0) * span + (x0 - region.x0); i < end; i += 1, j += 1) {
+    const edge = alpha[i];
+    if (edge <= 0) continue;
     const L = state.lab.L[i];
     const A = state.lab.A[i];
     const B = state.lab.B[i];
@@ -532,11 +541,40 @@ function applySurface(data, surface, region) {
       g += (255 - g) * spec;
       b += (255 - b) * spec;
     }
-    const p = i * 4;
-    data[p] = src[p] * (1 - coverage) + r * coverage;
-    data[p + 1] = src[p + 1] * (1 - coverage) + g * coverage;
-    data[p + 2] = src[p + 2] * (1 - coverage) + b * coverage;
-    data[p + 3] = 255;
+    acc.total[j] += edge;
+    acc.covered[j] += edge * surface.coverage;
+    acc.r[j] += r * edge;
+    acc.g[j] += g * edge;
+    acc.b[j] += b * edge;
+  }
+}
+
+function blendBuffers(region) {
+  const size = (region.x1 - region.x0) * (region.y1 - region.y0);
+  return {
+    total: new Float32Array(size),
+    covered: new Float32Array(size),
+    r: new Float32Array(size),
+    g: new Float32Array(size),
+    b: new Float32Array(size),
+  };
+}
+
+function compositeBlend(data, acc, region) {
+  // Where two surfaces' soft edges overlap at a corner, their weights are shared out instead of stacked,
+  // so the seam gets paint from both walls and none of the original photo. Matches blend_layers in color_math.py.
+  const src = state.lab.rgb;
+  const span = region.x1 - region.x0;
+  for (let y = region.y0; y < region.y1; y += 1) {
+    for (let x = region.x0, j = (y - region.y0) * span, p = (y * state.width + region.x0) * 4; x < region.x1; x += 1, j += 1, p += 4) {
+      const total = acc.total[j];
+      if (total <= 0) continue;
+      const alpha = Math.min(1, total) * (acc.covered[j] / total);
+      data[p] = src[p] * (1 - alpha) + (acc.r[j] / total) * alpha;
+      data[p + 1] = src[p + 1] * (1 - alpha) + (acc.g[j] / total) * alpha;
+      data[p + 2] = src[p + 2] * (1 - alpha) + (acc.b[j] / total) * alpha;
+      data[p + 3] = 255;
+    }
   }
 }
 
@@ -600,7 +638,9 @@ function rebuildPaint() {
       const start = (y * width + region.x0) * 4;
       data.set(src.subarray(start, (y * width + region.x1) * 4), start);
     }
-    for (const { surface } of painted.values()) applySurface(data, surface, region);
+    const acc = blendBuffers(region);
+    for (const { surface } of painted.values()) applySurface(acc, surface, region);
+    compositeBlend(data, acc, region);
     ctx.putImageData(state.paintImage, 0, 0, region.x0, region.y0, region.x1 - region.x0, region.y1 - region.y0);
   }
   state.paintKeys = new Map();
@@ -995,19 +1035,24 @@ function renderSwatches() {
   });
   const chips = $("group-chips");
   chips.innerHTML = "";
+  state.favoritesGrid = null;
   if (isMobile()) {
     // Phones show one color family at a time, chosen from a chip row, so the grid gets the room.
-    if (!names.includes(state.mobileGroup)) state.mobileGroup = names[0] || "";
-    names.forEach((name) => {
+    if (state.mobileGroup !== FAVORITES && !names.includes(state.mobileGroup)) state.mobileGroup = names[0] || FAVORITES;
+    [FAVORITES, ...names].forEach((name) => {
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = `group-chip${name === state.mobileGroup ? " is-on" : ""}`;
       chip.setAttribute("role", "tab");
       chip.setAttribute("aria-selected", String(name === state.mobileGroup));
       const label = document.createElement("span");
-      label.textContent = name;
+      label.textContent = name === FAVORITES ? "\u2665 Favorites" : name;
       const count = document.createElement("small");
-      count.textContent = grouped.get(name).length.toLocaleString();
+      count.textContent = (name === FAVORITES ? state.favorites : grouped.get(name)).length.toLocaleString();
+      if (name === FAVORITES) {
+        chip.classList.add("fav-chip");
+        state.favoritesCount = count;
+      }
       chip.append(label, count);
       chip.addEventListener("click", () => {
         state.mobileGroup = name;
@@ -1018,16 +1063,21 @@ function renderSwatches() {
     });
     const grid = document.createElement("div");
     grid.className = "group-paints";
-    const active = selected();
-    const fragment = document.createDocumentFragment();
-    (grouped.get(state.mobileGroup) || []).forEach((color) => fragment.appendChild(paintButton(color, active)));
-    grid.appendChild(fragment);
+    if (state.mobileGroup === FAVORITES) {
+      fillFavorites(grid);
+    } else {
+      const active = selected();
+      const fragment = document.createDocumentFragment();
+      (grouped.get(state.mobileGroup) || []).forEach((color) => fragment.appendChild(paintButton(color, active)));
+      grid.appendChild(fragment);
+    }
     wrap.appendChild(grid);
     wrap.scrollTop = scroll;
     const on = chips.querySelector(".is-on");
     if (on) chips.scrollLeft = on.offsetLeft - chips.clientWidth / 2 + on.offsetWidth / 2;
     return;
   }
+  wrap.appendChild(favoritesGroup());
   names.forEach((name) => {
     const details = document.createElement("details");
     details.className = "color-group";
@@ -1058,8 +1108,160 @@ function renderSwatches() {
   wrap.scrollTop = scroll;
 }
 
+function favoriteKey(color) {
+  return `${color.brandId}|${color.code}`.toLowerCase();
+}
+
+function isFavorite(color) {
+  const key = favoriteKey(color);
+  return state.favorites.some((item) => favoriteKey(item) === key);
+}
+
+function syncHeart(heart, on, name) {
+  heart.setAttribute("aria-pressed", String(on));
+  heart.setAttribute("aria-label", on ? `Remove ${name} from favorites` : `Add ${name} to favorites`);
+  heart.textContent = on ? "\u2665" : "\u2661";
+}
+
+function favoritesGroup() {
+  const details = document.createElement("details");
+  details.className = "color-group fav-group";
+  details.open = state.openGroups[FAVORITES] ?? state.favorites.length > 0;
+  const summary = document.createElement("summary");
+  const title = document.createElement("span");
+  title.textContent = "\u2665 Favorites";
+  const count = document.createElement("small");
+  count.textContent = String(state.favorites.length);
+  state.favoritesCount = count;
+  summary.append(title, count);
+  const grid = document.createElement("div");
+  grid.className = "group-paints";
+  fillFavorites(grid);
+  details.append(summary, grid);
+  details.addEventListener("toggle", () => {
+    state.openGroups[FAVORITES] = details.open;
+  });
+  return details;
+}
+
+function fillFavorites(grid) {
+  state.favoritesGrid = grid;
+  grid.innerHTML = "";
+  if (!state.favorites.length) {
+    const empty = document.createElement("p");
+    empty.className = "hint fav-empty";
+    empty.textContent = state.user
+      ? "Tap the heart on any color to keep it here. Favorites are saved to your account."
+      : "Tap the heart on any color to keep it here. Sign in to save favorites to your account.";
+    grid.appendChild(empty);
+    return;
+  }
+  const active = selected();
+  const fragment = document.createDocumentFragment();
+  state.favorites.forEach((color) => fragment.appendChild(paintButton(color, active)));
+  grid.appendChild(fragment);
+}
+
+function refreshFavorites() {
+  document.querySelectorAll("#swatches .fav").forEach((heart) => {
+    const on = state.favorites.some((item) => favoriteKey(item) === heart.dataset.key);
+    syncHeart(heart, on, heart.dataset.name);
+  });
+  if (state.favoritesCount) state.favoritesCount.textContent = state.favorites.length.toLocaleString();
+  if (state.favoritesGrid && document.contains(state.favoritesGrid)) fillFavorites(state.favoritesGrid);
+  syncCustomHeart();
+}
+
+function syncCustomHeart() {
+  const hex = $("custom-hex").value.trim().toUpperCase();
+  const on = /^#[0-9A-F]{6}$/.test(hex) && isFavorite(customColor(hex));
+  $("fav-custom").setAttribute("aria-pressed", String(on));
+  $("fav-custom").textContent = on ? "\u2665 Favorited" : "\u2661 Favorite";
+}
+
+function customColor(hex) {
+  const value = hex.toUpperCase();
+  return { brand: "Custom", brandId: "custom", code: value, name: value, hex: value };
+}
+
+function toggleFavorite(color) {
+  const key = favoriteKey(color);
+  const on = isFavorite(color);
+  state.favorites = on
+    ? state.favorites.filter((item) => favoriteKey(item) !== key)
+    : [{ brand: color.brand, brandId: color.brandId, code: color.code, name: color.name, hex: color.hex }, ...state.favorites].slice(0, 300);
+  refreshFavorites();
+  storeFavorites();
+  if (!on && !state.user && !state.favoritesNoticed) {
+    state.favoritesNoticed = true;
+    toast(preferencesAllowed() ? "Saved on this device. Sign in to keep favorites on your account." : "Added to favorites. Sign in to keep them.");
+  } else if (isMobile()) {
+    toast(on ? `Removed ${color.name} from favorites.` : `Added ${color.name} to favorites.`);
+  }
+}
+
+function deviceFavorites() {
+  if (!preferencesAllowed()) return [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FAVORITES_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((item) => item && item.brandId && item.code && item.hex) : [];
+  } catch {
+    return [];
+  }
+}
+
+function storeFavorites() {
+  if (!state.user) {
+    if (preferencesAllowed()) localStorage.setItem(FAVORITES_KEY, JSON.stringify(state.favorites));
+    return;
+  }
+  clearTimeout(storeFavorites.timer);
+  storeFavorites.timer = setTimeout(pushFavorites, 400);
+}
+
+async function pushFavorites() {
+  try {
+    const response = await fetch("/api/favorites", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ favorites: state.favorites }),
+    });
+    if (response.status === 401) {
+      signedOut();
+      toast("Sign in again to save your favorites.");
+      return;
+    }
+    if (!response.ok) throw new Error(await readError(response));
+  } catch {
+    toast("Favorites couldn't be saved. Check your connection.");
+  }
+}
+
+async function pullFavorites() {
+  // On sign-in, favorites made on this device join the account's list.
+  try {
+    const response = await fetch("/api/favorites");
+    if (!response.ok) return;
+    const saved = (await response.json()).favorites || [];
+    const keys = new Set(saved.map(favoriteKey));
+    const extra = [...state.favorites, ...deviceFavorites()].filter((item) => {
+      const key = favoriteKey(item);
+      if (keys.has(key)) return false;
+      keys.add(key);
+      return true;
+    });
+    state.favorites = [...extra, ...saved].slice(0, 300);
+    if (extra.length) await pushFavorites();
+    localStorage.removeItem(FAVORITES_KEY);
+    renderSwatches();
+    syncCustomHeart();
+  } catch {
+    // Keep what's on screen; the next change will try to save again.
+  }
+}
+
 function paintButton(color, current) {
-  const label = `${color.brand} ${color.code} ${color.name}`;
+  const label = color.brandId === "custom" ? "" : `${color.brand} ${color.code} ${color.name}`;
   const button = document.createElement("button");
   button.type = "button";
   button.className = "paint";
@@ -1068,8 +1270,10 @@ function paintButton(color, current) {
   const chip = document.createElement("span");
   chip.className = "chip";
   chip.style.background = color.hex;
+  const cell = document.createElement("div");
+  cell.className = "paint-cell";
   const rgb = parseHex(color.hex);
-  if (rgb) button.style.setProperty("--on-chip", rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114 > 150 ? "#1c1917" : "#fffcf8");
+  if (rgb) cell.style.setProperty("--on-chip", rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114 > 150 ? "#1c1917" : "#fffcf8");
   const text = document.createElement("span");
   text.className = "paint-label";
   const title = document.createElement("strong");
@@ -1079,9 +1283,17 @@ function paintButton(color, current) {
   text.append(title, meta);
   button.title = `${color.brand} · ${color.code} · ${color.hex}${color.archived ? " · archived" : ""}`;
   button.append(chip, text);
-  button.setAttribute("aria-label", `${label} ${color.hex}`);
-  button.addEventListener("click", () => chooseColor(color.hex, label));
-  return button;
+  button.setAttribute("aria-label", `${label || color.name} ${color.hex}`);
+  button.addEventListener("click", () => chooseColor(color.hex, label, color));
+  const heart = document.createElement("button");
+  heart.type = "button";
+  heart.className = "fav";
+  heart.dataset.key = favoriteKey(color);
+  heart.dataset.name = color.name;
+  syncHeart(heart, isFavorite(color), color.name);
+  heart.addEventListener("click", () => toggleFavorite(color));
+  cell.append(button, heart);
+  return cell;
 }
 
 function updateSwatchSelection() {
@@ -1140,7 +1352,7 @@ function renderRecent() {
   });
 }
 
-function chooseColor(hex, label) {
+function chooseColor(hex, label, color, fromPairs) {
   const current = selected();
   if (!current) {
     toast("Select a surface first.");
@@ -1156,6 +1368,229 @@ function chooseColor(hex, label) {
   redraw();
   if (isMobile() && label) toast(label);
   setPickerFromHex(current.color);
+  if (color && color.brandId !== "custom" && !fromPairs) loadPairs(color);
+}
+
+function compareChoices() {
+  // Favorites first, then the coordinating suggestions on screen, then recently used colors.
+  const seen = new Set();
+  const out = [];
+  const add = (color) => {
+    const key = color.hex.toUpperCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(color);
+  };
+  const current = selected();
+  if (current && current.color) add(currentColorChoice(current));
+  state.favorites.forEach((color) => add({ ...color, label: color.brandId === "custom" ? "" : `${color.brand} ${color.code} ${color.name}` }));
+  (state.pairsData ? [...state.pairsData.official, ...state.pairsData.suggested] : []).forEach((color) =>
+    add({ ...color, label: `${color.brand} ${color.code} ${color.name}` }),
+  );
+  loadRecent().forEach((hex) => add({ hex, name: hex, label: "", brandId: "custom", code: hex }));
+  return out;
+}
+
+function currentColorChoice(surface) {
+  // Brand labels read "Brand CODE Name"; custom colors have no label.
+  const parts = (surface.colorLabel || "").split(" ");
+  const name = parts.length > 2 ? parts.slice(2).join(" ") : surface.color;
+  return { hex: surface.color, name, label: surface.colorLabel || "", code: parts[1] || surface.color };
+}
+
+function compareTargets() {
+  const current = selected();
+  if (state.comparison.scope === "selected" && current) return [current.id];
+  return state.surfaces.filter((surface) => surface.kind === "wall" && surface.included !== false).map((surface) => surface.id);
+}
+
+function openCompare() {
+  if (!state.sessionId) return;
+  const current = selected();
+  state.comparison.scope = current ? "selected" : "walls";
+  const choices = compareChoices();
+  const start = [];
+  if (current && current.color) start.push(currentColorChoice(current));
+  for (const color of choices) {
+    if (start.length >= 4) break;
+    if (!start.some((item) => item.hex.toUpperCase() === color.hex.toUpperCase())) start.push(color);
+  }
+  state.comparison.colors = start.slice(0, 4);
+  state.lastFocus = document.activeElement;
+  $("compare-dialog").hidden = false;
+  $("compare-close").focus();
+  renderCompare();
+}
+
+function renderCompare() {
+  const current = selected();
+  $("compare-scope-selected").textContent = current ? current.name : "This wall";
+  $("compare-scope-selected").disabled = !current;
+  document.querySelectorAll("[data-scope]").forEach((button) => {
+    const on = button.dataset.scope === state.comparison.scope;
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-checked", String(on));
+  });
+  const pick = $("compare-pick");
+  pick.innerHTML = "";
+  const choices = compareChoices();
+  state.comparison.colors.forEach((color) => {
+    if (!choices.some((item) => item.hex.toUpperCase() === color.hex.toUpperCase())) choices.unshift(color);
+  });
+  if (!choices.length) {
+    pick.innerHTML = '<p class="hint">Heart a few colors first, or pick some to see them here.</p>';
+  }
+  choices.forEach((color) => {
+    const on = state.comparison.colors.some((item) => item.hex.toUpperCase() === color.hex.toUpperCase());
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "compare-choice";
+    button.setAttribute("aria-pressed", String(on));
+    button.setAttribute("aria-label", `${on ? "Remove" : "Add"} ${color.name} ${on ? "from" : "to"} the comparison`);
+    button.title = color.label || color.name;
+    const chip = document.createElement("span");
+    chip.className = "compare-chip";
+    chip.style.background = color.hex;
+    const name = document.createElement("span");
+    name.textContent = color.name;
+    button.append(chip, name);
+    button.addEventListener("click", () => {
+      const index = state.comparison.colors.findIndex((item) => item.hex.toUpperCase() === color.hex.toUpperCase());
+      if (index >= 0) state.comparison.colors.splice(index, 1);
+      else if (state.comparison.colors.length >= 4) {
+        toast("Compare up to four colors at a time.");
+        return;
+      } else state.comparison.colors.push(color);
+      renderCompare();
+    });
+    pick.appendChild(button);
+  });
+  renderCompareGrid();
+}
+
+async function renderCompareGrid() {
+  const token = (state.comparison.token += 1);
+  const grid = $("compare-grid");
+  grid.innerHTML = "";
+  const targets = new Set(compareTargets());
+  if (!targets.size) {
+    grid.innerHTML = '<p class="hint">No walls to compare yet.</p>';
+    return;
+  }
+  const tiles = state.comparison.colors.map((color) => {
+    const figure = document.createElement("figure");
+    figure.className = "compare-tile is-loading";
+    const canvas = document.createElement("canvas");
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute("aria-label", `The room with ${color.name}`);
+    const caption = document.createElement("figcaption");
+    const chip = document.createElement("span");
+    chip.className = "compare-chip";
+    chip.style.background = color.hex;
+    const text = document.createElement("span");
+    text.className = "compare-name";
+    text.textContent = color.label ? color.label : color.name;
+    const use = document.createElement("button");
+    use.type = "button";
+    use.className = "solid-btn";
+    use.textContent = "Use this";
+    use.addEventListener("click", () => useComparison(color));
+    caption.append(chip, text, use);
+    figure.append(canvas, caption);
+    grid.appendChild(figure);
+    return { figure, canvas, color };
+  });
+  for (const tile of tiles) {
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    if (token !== state.comparison.token || $("compare-dialog").hidden) return;
+    drawVariant(tile.canvas, targets, tile.color.hex);
+    tile.figure.classList.remove("is-loading");
+  }
+}
+
+function drawVariant(canvas, targets, hex) {
+  // The same photo with the target surfaces in one color and every other surface as it is now.
+  const width = state.width;
+  const height = state.height;
+  const region = { x0: 0, y0: 0, x1: width, y1: height };
+  const image = new ImageData(new Uint8ClampedArray(state.lab.rgb), width, height);
+  const acc = blendBuffers(region);
+  for (const surface of state.surfaces) {
+    if (surface.included === false) continue;
+    const color = targets.has(surface.id) ? hex : surface.color;
+    if (!color) continue;
+    applySurface(acc, color === surface.color ? surface : { ...surface, color }, region);
+  }
+  compositeBlend(image.data, acc, region);
+  const full = document.createElement("canvas");
+  full.width = width;
+  full.height = height;
+  full.getContext("2d").putImageData(image, 0, 0);
+  const scale = Math.min(1, 900 / width);
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+  canvas.getContext("2d").drawImage(full, 0, 0, canvas.width, canvas.height);
+}
+
+function useComparison(color) {
+  const targets = new Set(compareTargets());
+  pushUndo();
+  state.surfaces.forEach((surface) => {
+    if (!targets.has(surface.id)) return;
+    surface.color = color.hex.toUpperCase();
+    surface.colorLabel = color.label || "";
+  });
+  state.paintDirty = true;
+  rememberColor(color.hex);
+  renderSurfaces();
+  updateSwatchSelection();
+  redraw();
+  closeDialogs();
+  toast(`Using ${color.name}.`);
+}
+
+async function loadPairs(color) {
+  const key = favoriteKey(color);
+  if (state.pairsFor === key) {
+    if (state.pairsHiddenFor !== key) $("pairs").hidden = false;
+    return;
+  }
+  state.pairsFor = key;
+  try {
+    const params = new URLSearchParams({ brand: color.brandId, code: color.code });
+    const response = await fetch(`/api/colors/coordinate?${params}`);
+    if (!response.ok || state.pairsFor !== key) return;
+    state.pairsData = await response.json();
+    renderPairs(state.pairsData);
+  } catch {
+    // Suggestions are a bonus; the color is already applied.
+  }
+}
+
+function renderPairs(data) {
+  const list = $("pairs-list");
+  list.innerHTML = "";
+  $("pairs-title").textContent = `Goes with ${data.color.name}`;
+  const label = (color) => `${color.brand} ${color.code} ${color.name}`;
+  [...data.official, ...data.suggested].forEach((color) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "pair";
+    button.title = `${color.role}: ${color.brand} ${color.code} ${color.name}`;
+    button.setAttribute("aria-label", `${color.role}: ${label(color)} ${color.hex}`);
+    const chip = document.createElement("span");
+    chip.className = "pair-chip";
+    chip.style.background = color.hex;
+    const role = document.createElement("small");
+    role.textContent = { "Designer pairing": "Designer pick", "Coordinating white": "Matching white" }[color.role] || color.role;
+    const name = document.createElement("span");
+    name.className = "pair-name";
+    name.textContent = color.name;
+    button.append(chip, name, role);
+    button.addEventListener("click", () => chooseColor(color.hex, label(color), color, true));
+    list.appendChild(button);
+  });
+  $("pairs").hidden = state.pairsHiddenFor === state.pairsFor || !list.childElementCount;
 }
 
 function hsvToRgb(hue, sat, val) {
@@ -1207,6 +1642,7 @@ function setPickerFromHex(hex) {
   state.sat = sat;
   state.val = val;
   $("custom-hex").value = hex.toUpperCase();
+  syncCustomHeart();
   drawPicker();
 }
 
@@ -1276,6 +1712,7 @@ function pickerFraction(event, canvas) {
 function previewPicker() {
   const hex = pickerHex();
   $("custom-hex").value = hex;
+  syncCustomHeart();
   drawPicker();
   const current = selected();
   if (!current) return;
@@ -1908,7 +2345,7 @@ function bind() {
   });
   document.querySelectorAll("[data-cookie-settings]").forEach((button) => button.addEventListener("click", showConsent));
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && (!$("signin").hidden || !$("collection").hidden)) closeDialogs();
+    if (event.key === "Escape" && (!$("signin").hidden || !$("collection").hidden || !$("compare-dialog").hidden || !$("share-dialog").hidden)) closeDialogs();
   });
   $("signin-close").addEventListener("click", closeDialogs);
   $("collection-close").addEventListener("click", closeDialogs);
@@ -2015,6 +2452,42 @@ function bind() {
   $("color-more").addEventListener("click", () => loadColors(false));
   $("add-wall").addEventListener("click", addWallFromDots);
   $("clear-dots").addEventListener("click", clearLines);
+  $("share-btn").addEventListener("click", shareRoom);
+  $("share-close").addEventListener("click", closeDialogs);
+  $("share-copy").addEventListener("click", () => state.share && copyText(state.share.url));
+  $("share-native").addEventListener("click", async () => {
+    try {
+      await navigator.share({ title: "My room in RoomRoller", url: state.share.url });
+    } catch {
+      // Closing the share sheet isn't an error.
+    }
+  });
+  $("share-delete").addEventListener("click", async () => {
+    if (state.share && (await deleteShare(state.share.token))) closeDialogs();
+  });
+  $("compare-btn").addEventListener("click", openCompare);
+  $("m-compare").addEventListener("click", openCompare);
+  $("compare-close").addEventListener("click", closeDialogs);
+  document.querySelectorAll("[data-scope]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.disabled) return;
+      state.comparison.scope = button.dataset.scope;
+      renderCompare();
+    });
+  });
+  $("pairs-close").addEventListener("click", () => {
+    state.pairsHiddenFor = state.pairsFor;
+    $("pairs").hidden = true;
+  });
+  $("fav-custom").addEventListener("click", () => {
+    const hex = $("custom-hex").value.trim().toUpperCase();
+    if (!/^#[0-9A-F]{6}$/.test(hex)) {
+      toast("Enter a color like #C45C26.");
+      return;
+    }
+    toggleFavorite(customColor(hex));
+  });
+  $("custom-hex").addEventListener("input", syncCustomHeart);
   $("custom-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const hex = parseHex($("custom-hex").value);
@@ -2323,6 +2796,7 @@ async function boot() {
   syncLineButtons();
   if ($("fold-mix").open) sizePicker();
   setPickerFromHex("#C45C26");
+  state.favorites = deviceFavorites();
   loadAccount();
   if (!consent()) $("consent").hidden = false;
   await loadColors(true);
@@ -2340,6 +2814,7 @@ async function loadAccount() {
     state.clientId = "";
   }
   renderAccount();
+  if (state.user) pullFavorites();
 }
 
 function loadGoogle() {
@@ -2438,6 +2913,7 @@ async function onGoogleCredential(response) {
     });
     if (!result.ok) throw new Error(await readError(result));
     state.user = (await result.json()).user;
+    pullFavorites();
     renderAccount();
     $("signin").hidden = true;
     toast(`Signed in as ${state.user.name}.`);
@@ -2464,8 +2940,11 @@ function signedOut() {
   state.user = null;
   state.collectionId = null;
   state.collectionName = "";
+  state.favorites = deviceFavorites();
   $("collection").hidden = true;
   renderAccount();
+  renderSwatches();
+  syncCustomHeart();
 }
 
 function askSignIn(next) {
@@ -2481,9 +2960,12 @@ function askSignIn(next) {
 }
 
 function closeDialogs() {
-  const open = !$("signin").hidden || !$("collection").hidden;
+  const open = !$("signin").hidden || !$("collection").hidden || !$("compare-dialog").hidden || !$("share-dialog").hidden;
   $("signin").hidden = true;
+  $("share-dialog").hidden = true;
   $("collection").hidden = true;
+  $("compare-dialog").hidden = true;
+  state.comparison.token += 1;
   state.afterSignIn = null;
   if (open && state.lastFocus && document.contains(state.lastFocus)) state.lastFocus.focus();
 }
@@ -2558,6 +3040,126 @@ async function uploadCollection(files) {
   }
 }
 
+function canvasJpeg(canvas) {
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Couldn't prepare the picture."))), "image/jpeg", 0.88),
+  );
+}
+
+function shareColors() {
+  return state.surfaces
+    .filter((surface) => surface.included !== false && surface.color)
+    .map((surface) => ({ surface: surface.name, ...currentColorChoice(surface) }));
+}
+
+async function shareRoom() {
+  if (!state.sessionId) return;
+  if (!state.user) {
+    askSignIn(shareRoom);
+    return;
+  }
+  if (!shareColors().length) {
+    toast("Paint a wall first, then share the before and after.");
+    return;
+  }
+  state.lastFocus = document.activeElement;
+  $("share-dialog").hidden = false;
+  $("share-busy").hidden = false;
+  $("share-busy").textContent = "Creating your link…";
+  $("share-ready").hidden = true;
+  $("share-close").focus();
+  try {
+    if (state.paintDirty) rebuildPaint();
+    const body = new FormData();
+    body.append("before", await canvasJpeg(state.baseCanvas), "before.jpg");
+    body.append("after", await canvasJpeg(state.paintCanvas), "after.jpg");
+    body.append("meta", JSON.stringify({ name: state.collectionName || "My room", colors: shareColors() }));
+    const response = await fetch("/api/shares", { method: "POST", body });
+    if (response.status === 401) {
+      $("share-dialog").hidden = true;
+      await checkSignedIn(response, shareRoom);
+      return;
+    }
+    if (!response.ok) throw new Error(await readError(response));
+    const share = await response.json();
+    state.share = { ...share, url: `${window.location.origin}${share.path}` };
+    $("share-url").value = state.share.url;
+    $("share-open").href = state.share.url;
+    $("share-native").hidden = !navigator.share;
+    $("share-busy").hidden = true;
+    $("share-ready").hidden = false;
+    $("share-copy").focus();
+  } catch (error) {
+    $("share-busy").textContent = error.message || "The link couldn't be created.";
+  }
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Link copied.");
+  } catch {
+    $("share-url").select();
+    toast("Press Copy on your keyboard to copy the link.");
+  }
+}
+
+async function deleteShare(token) {
+  if (!window.confirm("Delete this link? Anyone who has it won't be able to open it anymore.")) return false;
+  try {
+    const response = await fetch(`/api/shares/${encodeURIComponent(token)}`, { method: "DELETE" });
+    if (await checkSignedIn(response, showCollection)) return false;
+    if (!response.ok) throw new Error(await readError(response));
+    toast("Link deleted.");
+    return true;
+  } catch (error) {
+    toast(error.message);
+    return false;
+  }
+}
+
+async function renderShareList() {
+  const list = $("share-list");
+  list.innerHTML = "";
+  $("share-list-title").hidden = true;
+  try {
+    const response = await fetch("/api/shares");
+    if (!response.ok) return;
+    const shares = await response.json();
+    $("share-list-title").hidden = !shares.length;
+    shares.forEach((share) => {
+      const url = `${window.location.origin}/s/${share.token}`;
+      const item = document.createElement("li");
+      const when = new Date(share.created);
+      const title = document.createElement("span");
+      title.textContent = `${share.name} · ${Number.isNaN(when.getTime()) ? "" : when.toLocaleDateString()}`;
+      const open = document.createElement("a");
+      open.className = "text-btn";
+      open.href = url;
+      open.target = "_blank";
+      open.rel = "noopener";
+      open.textContent = "Open";
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "text-btn";
+      copy.textContent = "Copy";
+      copy.addEventListener("click", () => copyText(url));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "text-btn";
+      remove.textContent = "Delete";
+      remove.setAttribute("aria-label", `Delete the shared link for ${share.name}`);
+      remove.addEventListener("click", async () => {
+        if (await deleteShare(share.token)) renderShareList();
+      });
+      item.append(title, open, copy, remove);
+      list.appendChild(item);
+    });
+  } catch {
+    // The rooms list still works without the shares list.
+  }
+}
+
 async function showCollection() {
   if (!state.user) {
     askSignIn(showCollection);
@@ -2566,6 +3168,7 @@ async function showCollection() {
   state.lastFocus = document.activeElement;
   $("collection").hidden = false;
   $("collection-close").focus();
+  renderShareList();
   const list = $("collection-list");
   list.innerHTML = "";
   try {

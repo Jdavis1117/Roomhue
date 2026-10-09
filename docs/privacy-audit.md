@@ -11,6 +11,8 @@ The public policies live at `/privacy`, `/terms`, and `/cookies` (files in `stat
 | Opened photo (pixels only) | Server memory (`_sessions` in `app/main.py`) | Find walls, render preview | 2 hours idle, or fewer when 6+ photos are open |
 | Saved room: photo PNG, thumbnail, wall masks, colors, name, time | Replit Object Storage, `users/<google id>/<room id>/` | Collection | Until the room or account is deleted |
 | Google account ID and first name | Signed session cookie `roomhue_session` | Know whose collection it is; show name in menu | 60 days or sign-out |
+| Favorite colors (brand, ID, code, name, hex; max 300) | `users/<google id>/favorites.json` when signed in; `localStorage["roomroller-favorites"]` when signed out and Preferences are allowed | Favorites list | Until removed or account deleted; device copy moves to the account at sign-in |
+| Shared links: before and after JPEGs (re-encoded, no metadata), room name, colors | `users/<google id>/shares/<token>/`, plus a public pointer `shares/<token>.json` | Public before/after page at `/s/<token>`, marked noindex | Until the link or the account is deleted; max 50 per account |
 | Agreement record (`terms_version`, `accepted_at`, `first_accepted_at`) | `users/<google id>/account.json` | Proof of consent to Terms and Privacy Policy | Until account deletion |
 | Cookie choice | `localStorage["roomroller-consent"]` | Don't ask every visit | Until cleared |
 | Recent colors, panel width | `localStorage["roomhue-recent"]`, `["roomhue-panel-width"]` | Preferences | Only written if Preferences are allowed |
@@ -63,13 +65,15 @@ No analytics, advertising, error-tracking, font, or CDN services are used. The p
 | opencv-python-headless | Apache-2.0 | Wall detection |
 | python-multipart, requests, google-auth, google-cloud-storage | Apache-2.0 | Uploads, Google token check, storage |
 | replit-object-storage | ISC | Storage client |
+| onnxruntime | MIT | Runs the wall-detection model on the server |
 
 All are permissive and allow commercial use. Apache-2.0 packages require keeping their license and NOTICE files when redistributing them; RoomRoller installs them from PyPI and does not redistribute them.
 
 ## Fonts and images
 
 - Fonts: system fonts only (Segoe UI, Palatino, Georgia, system-ui). No font files are bundled or downloaded, so there is nothing to license.
-- Images: the favicon/logo is an inline SVG drawn for RoomRoller; the sample room is generated in code (`app/sample_room.py`). No stock or third-party images.
+- Images: the favicon/logo is an inline SVG drawn for RoomRoller. The sample room (`data/sample/living-room.jpg`) is a CC0 photo from Wikimedia Commons, credited in the Terms. The drawn room in `app/sample_room.py` remains as a test fixture.
+- Wall-detection model: `models/surfaces-upernet-convnext-tiny-int8.onnx`, from OpenMMLab's UperNet ConvNeXt-T (MIT). It was trained on ADE20K, whose images carry their own dataset terms; see `docs/wall-detection.md`. Photos are analysed on the server only; no outside AI service receives them.
 - Paint data: names, numbers, and color values published by each brand. Names and numbers are the brands' trademarks, used only to identify their colors. The Terms state that RoomRoller is not affiliated with any brand.
 
 ## Accessibility

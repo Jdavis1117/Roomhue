@@ -49,7 +49,16 @@ def title_case(name: str) -> str:
     return re.sub(r"(^|[\s/(\"&.])(\w)", lambda match: match.group(1) + match.group(2).upper(), name)
 
 
-def add(colors: list[dict], seen: set[tuple[str, str]], brand: str, code: str, name: str, hex_value: str, archived: bool = False) -> None:
+def add(
+    colors: list[dict],
+    seen: set[tuple[str, str]],
+    brand: str,
+    code: str,
+    name: str,
+    hex_value: str,
+    archived: bool = False,
+    pairs: list[str] | None = None,
+) -> None:
     name = clean_name(name)
     code = clean_name(str(code))
     hex_value = clean_hex(hex_value) or ""
@@ -62,6 +71,8 @@ def add(colors: list[dict], seen: set[tuple[str, str]], brand: str, code: str, n
     row = {"brand": brand, "code": code, "name": name, "hex": hex_value}
     if archived:
         row["archived"] = True
+    if pairs:
+        row["pairs"] = pairs
     colors.append(row)
 
 
@@ -69,10 +80,15 @@ def main() -> None:
     colors: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    for row in json.loads((SOURCE / "sherwin-williams-prism.json").read_text(encoding="utf-8")):
+    prism = json.loads((SOURCE / "sherwin-williams-prism.json").read_text(encoding="utf-8"))
+    sw_code = {row["id"]: f"SW{int(row['colorNumber']):04d}" for row in prism}
+    for row in prism:
         if row.get("ignore"):
             continue
-        add(colors, seen, "sherwin-williams", f"SW{int(row['colorNumber']):04d}", row["name"], row["hex"], bool(row.get("archived")))
+        # Sherwin-Williams' own coordinating colors: two designer pairings and a matching white.
+        coordinating = row.get("coordinatingColors") or {}
+        pairs = [sw_code[key] for key in (coordinating.get(name) for name in ("coord1ColorId", "coord2ColorId", "whiteColorId")) if key in sw_code]
+        add(colors, seen, "sherwin-williams", f"SW{int(row['colorNumber']):04d}", row["name"], row["hex"], bool(row.get("archived")), pairs)
     for row in json.loads((SOURCE / "sherwin-williams.json").read_text(encoding="utf-8")):
         add(colors, seen, "sherwin-williams", row["label"], row["name"], row["hex"], True)
 

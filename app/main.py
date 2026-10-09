@@ -5,15 +5,17 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import json
 import os
 import threading
 import time
 import uuid
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
@@ -21,18 +23,22 @@ from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import auth
+from app.catalog import coordinates as coordinate_colors
 from app.catalog import search as search_colors
 from app.collection import (
     delete_account,
     delete_room,
     import_rooms,
     list_rooms,
+    load_favorites,
     load_room,
     record_consent,
+    save_favorites,
     save_room,
     thumb_bytes,
 )
-from app.color_math import recolor_rgb
+from app import shares
+from app.color_math import blend_layers, paint_layer
 from app.detect import Surface, detect_surfaces, magic_wand, prepare_image, surfaces_from_lines
 from app.sample_room import make_sample_room
 
@@ -96,6 +102,18 @@ class GoogleSignIn(BaseModel):
     credential: str = Field(min_length=1, max_length=8192)
     accepted_terms: bool = False
     terms_version: str = ""
+
+
+class FavoriteColor(BaseModel):
+    brand: str = Field(min_length=1, max_length=60)
+    brandId: str = Field(min_length=1, max_length=40)
+    code: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=80)
+    hex: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+
+
+class FavoritesRequest(BaseModel):
+    favorites: list[FavoriteColor] = Field(default_factory=list, max_length=300)
 
 
 class SaveRoomRequest(BaseModel):
@@ -234,6 +252,14 @@ def cookies_page() -> FileResponse:
     return FileResponse(LEGAL / "cookies.html", headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/api/colors/coordinate")
+def colors_coordinate(brand: str, code: str) -> dict:
+    result = coordinate_colors(brand, code)
+    if result is None:
+        raise HTTPException(status_code=404, detail="That paint wasn't found.")
+    return result
+
+
 @app.get("/api/colors")
 def colors(brand: str = "", q: str = "", limit: int = 60, offset: int = 0) -> dict:
     return search_colors(brand, q, limit, offset)
@@ -260,6 +286,7 @@ def auth_google(request: Request, body: GoogleSignIn) -> dict:
 
 @app.delete("/api/account")
 def account_delete(request: Request, user_id: str = Depends(auth.require_user)) -> dict:
+    shares.delete_all_shares(user_id)
     removed = delete_account(user_id)
     request.session.clear()
     return {"ok": True, "removed": removed}
@@ -269,6 +296,67 @@ def account_delete(request: Request, user_id: str = Depends(auth.require_user)) 
 def auth_logout(request: Request) -> dict:
     request.session.clear()
     return {"ok": True}
+
+
+@app.post("/api/shares")
+async def share_create(
+    before: UploadFile = File(...),
+    after: UploadFile = File(...),
+    meta: str = Form("{}"),
+    user_id: str = Depends(auth.require_user),
+) -> dict:
+    try:
+        details = json.loads(meta)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="The share details couldn't be read.") from exc
+    if not isinstance(details, dict):
+        details = {}
+    record = shares.create_share(user_id, details.get("name", ""), details.get("colors"), await before.read(), await after.read())
+    return {"token": record["token"], "name": record["name"], "path": f"/s/{record['token']}"}
+
+
+@app.get("/api/shares")
+def share_list(user_id: str = Depends(auth.require_user)) -> list[dict]:
+    return shares.list_shares(user_id)
+
+
+@app.delete("/api/shares/{token}")
+def share_delete(token: str, user_id: str = Depends(auth.require_user)) -> dict:
+    shares.delete_share(user_id, token)
+    return {"ok": True}
+
+
+def _public_base(request: Request) -> str:
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}"
+
+
+@app.get("/s/{token}")
+def share_view(token: str, request: Request) -> HTMLResponse:
+    return HTMLResponse(
+        shares.share_page(token, _public_base(request)),
+        headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/s/{token}/{which}.jpg")
+def share_image(token: str, which: str) -> Response:
+    return Response(
+        shares.share_image(token, which),
+        media_type="image/jpeg",
+        headers={"X-Robots-Tag": "noindex", "Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/api/favorites")
+def favorites_list(user_id: str = Depends(auth.require_user)) -> dict:
+    return {"favorites": load_favorites(user_id)}
+
+
+@app.put("/api/favorites")
+def favorites_save(body: FavoritesRequest, user_id: str = Depends(auth.require_user)) -> dict:
+    return {"favorites": save_favorites(user_id, [color.model_dump() for color in body.favorites])}
 
 
 @app.get("/api/collection")
@@ -343,11 +431,23 @@ async def create_session(file: UploadFile = File(...)) -> dict:
     return _payload(session_id, image, detect_surfaces(image))
 
 
+SAMPLE_PHOTO = ROOT / "data" / "sample" / "living-room.jpg"
+
+
+@lru_cache(maxsize=1)
+def _sample_room() -> tuple[np.ndarray, list[Surface]]:
+    # A real CC0 photo shows what detection does on an actual room; the drawn room is the fallback.
+    photo = cv2.imread(str(SAMPLE_PHOTO), cv2.IMREAD_COLOR) if SAMPLE_PHOTO.is_file() else None
+    image = prepare_image(photo if photo is not None else make_sample_room().bgr)
+    return image, detect_surfaces(image)
+
+
 @app.post("/api/sample")
 def sample() -> dict:
-    image = prepare_image(make_sample_room().bgr)
+    image, surfaces = _sample_room()
+    image = image.copy()
     session_id = _store(image)
-    return _payload(session_id, image, detect_surfaces(image))
+    return _payload(session_id, image, surfaces)
 
 
 @app.post("/api/sessions/{session_id}/detect")
@@ -409,14 +509,18 @@ def wand(session_id: str, body: WandRequest) -> dict:
 def render(session_id: str, body: RenderRequest) -> Response:
     image = _image(session_id)
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    layers = []
     for surface in body.surfaces:
         if not surface.color:
             continue
         mask = _mask_from_b64(surface.mask_png_base64, image.shape[:2])
         try:
-            rgb = recolor_rgb(rgb, mask, surface.color, surface.coverage, surface.sheen, surface.shade)
+            layer = paint_layer(rgb, mask, surface.color, surface.coverage, surface.sheen, surface.shade)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if layer:
+            layers.append(layer)
+    rgb = blend_layers(rgb, layers)
     ok, buffer = cv2.imencode(".png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
     if not ok:
         raise HTTPException(status_code=500, detail="Could not render the preview.")

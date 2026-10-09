@@ -28,10 +28,16 @@
     <h2>What we collect and why</h2>
 
     <h3>Photos you open</h3>
-    <p>When you open a photo, it is sent to our server so it can find the walls, ceiling, and floor. We use only the image itself: location, camera, and other embedded details are not kept. Large phone photos are reduced in size in your browser before they are sent. An opened photo is held in the server's memory while you edit and is removed after two hours without use, or sooner. It is not written to storage unless you save the room.</p>
+    <p>When you open a photo, it is sent to our server so it can find the walls, ceiling, and floor. That analysis runs entirely on our server; photos are not sent to any outside AI service. We use only the image itself: location, camera, and other embedded details are not kept. Large phone photos are reduced in size in your browser before they are sent. An opened photo is held in the server's memory while you edit and is removed after two hours without use, or sooner. It is not written to storage unless you save the room.</p>
 
     <h3>Rooms you save</h3>
     <p>If you are signed in and choose Save, we store the photo (re-encoded without embedded details), a small preview image, the outlines of each wall, the colors and finishes you chose, the room's name, and when you saved it. Saved rooms are linked only to your account ID and are visible only to you.</p>
+
+    <h3>Favorite colors</h3>
+    <p>If you mark colors as favorites while signed in, we store that list (each color's brand, name, number, and value) with your account so it's there on any device. If you aren't signed in, favorites stay on your device, and only if you allow preferences; when you sign in, they're added to your account.</p>
+
+    <h3>Links you share</h3>
+    <p>If you choose Share, we store a copy of that room's photo, the painted version, the room's name, and the colors used, and give you a link. <strong>Anyone who has the link can see them</strong>, without signing in. Shared pages tell search engines not to list them. Each link is tied to your account; you can delete it anytime from Collection, and deleting your account deletes all your links.</p>
 
     <h3>Your Google account</h3>
     <p>Sign-in is optional and only needed to save rooms. When you sign in, Google sends us a signed token confirming who you are. We check it and keep only your Google account ID (a number) and your first name, which is shown in the menu. We do not receive your password, and we do not access your Gmail, Drive, contacts, or anything else in your Google account.</p>
@@ -48,7 +54,7 @@
     <h2>What we don't do</h2>
     <ul>
       <li>We do not use advertising, analytics, or tracking tools.</li>
-      <li>We do not sell, rent, or share your personal information, and we do not use it for targeted advertising.</li>
+      <li>We do not sell, rent, or share your personal information, and we do not use it for targeted advertising. The only things made public are links you choose to share.</li>
       <li>We do not use your photos to train AI models or for any purpose other than showing you your rooms.</li>
     </ul>
 
@@ -71,14 +77,14 @@
     <h2>How long we keep information</h2>
     <ul>
       <li>Photos you open but don't save: up to two hours in server memory.</li>
-      <li>Saved rooms: until you remove them or delete your account.</li>
+      <li>Saved rooms, favorite colors, and shared links: until you remove them or delete your account.</li>
       <li>Your account ID, first name, and agreement record: until you delete your account.</li>
       <li>Sign-in cookie: 60 days, or until you sign out.</li>
       <li>Technical logs: for the period our hosting provider keeps them.</li>
     </ul>
 
     <h2 id="delete">Delete your account and data</h2>
-    <p>You can delete your account and every room saved with it at any time. Deletion is immediate and can't be undone. Saved rooms are removed from storage right away.</p>
+    <p>You can delete your account, every room saved with it, and your favorite colors at any time. Deletion is immediate and can't be undone. Saved rooms are removed from storage right away.</p>
     <div id="delete-box">
       <p>To delete, sign in on <a href="/">RoomRoller</a>, then come back to this page, or open the menu and choose <strong>Delete account and data</strong>. You can also email <a href="mailto:privacy@roomroller.com?subject=Delete%20my%20RoomRoller%20data">privacy@roomroller.com</a> from any address. We'll confirm the request and complete it within 30 days.</p>
     </div>

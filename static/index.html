@@ -25,6 +25,7 @@
       <div class="top-actions" id="top-actions">
         <button type="button" id="collection-btn" class="text-btn">Collection</button>
         <button type="button" id="save-btn" class="text-btn" disabled>Save</button>
+        <button type="button" id="share-btn" class="text-btn" disabled>Share</button>
         <button type="button" id="sample-btn" class="text-btn">Sample room</button>
         <button type="button" id="open-btn" class="solid-btn">Open photo</button>
         <button type="button" id="export-btn" class="solid-btn" disabled>Download</button>
@@ -77,6 +78,7 @@
               <button type="button" id="m-redo" class="photo-btn" aria-label="Redo" disabled>&#8631;</button>
             </div>
             <button type="button" id="edit-toggle" class="photo-btn photo-edit" aria-pressed="false">Edit</button>
+            <button type="button" id="m-compare" class="photo-btn photo-compare">Compare</button>
             <div id="brush-cursor" class="brush-cursor" aria-hidden="true" hidden></div>
           </div>
           <div class="toolbar">
@@ -114,6 +116,7 @@
               <button type="button" id="zoom-reset" class="tool" title="Fit the photo">Fit</button>
               <button type="button" id="zoom-in" class="tool" title="Zoom in">+</button>
             </div>
+            <button type="button" id="compare-btn" class="text-btn">Compare colors</button>
             <button type="button" id="undo-btn" class="text-btn" disabled>Undo</button>
             <button type="button" id="redo-btn" class="text-btn" disabled>Redo</button>
           </div>
@@ -175,6 +178,7 @@
             <form id="custom-form" class="custom">
               <input id="custom-hex" type="text" value="#C45C26" spellcheck="false" aria-label="Hex color" maxlength="7" />
               <button type="submit" class="text-btn">Use</button>
+              <button type="button" id="fav-custom" class="text-btn" aria-pressed="false">&#9825; Favorite</button>
             </form>
             <div id="recent" class="recent" hidden></div>
           </div>
@@ -189,6 +193,13 @@
             </div>
             <div id="families" class="families"></div>
             <div id="group-chips" class="group-chips" role="tablist" aria-label="Color families"></div>
+            <section id="pairs" class="pairs" aria-labelledby="pairs-title" hidden>
+              <div class="pairs-head">
+                <h2 id="pairs-title" class="pairs-title"></h2>
+                <button type="button" id="pairs-close" class="link-btn">Hide</button>
+              </div>
+              <div id="pairs-list" class="pairs-list"></div>
+            </section>
             <div class="count-row">
               <p id="color-count" class="hint"></p>
               <button type="button" id="clear-color" class="text-btn" disabled>Clear color</button>
@@ -236,9 +247,47 @@
       <label class="text-btn collection-upload" for="collection-upload">Upload a saved room</label>
       <input id="collection-upload" type="file" accept=".json,.png,.jpg" webkitdirectory directory multiple hidden />
       <ul id="collection-list" class="collection-list"></ul>
+      <h3 class="share-list-title" id="share-list-title" hidden>Shared links</h3>
+      <ul id="share-list" class="share-list" aria-labelledby="share-list-title"></ul>
       <p class="collection-foot">
         <button type="button" id="collection-delete-account" class="link-btn danger-link">Delete account and data</button>
       </p>
+    </div>
+  </div>
+  <div id="compare-dialog" class="collection compare-overlay" hidden>
+    <div class="collection-card compare-card" role="dialog" aria-modal="true" aria-labelledby="compare-title">
+      <div class="section-head">
+        <h2 id="compare-title">Compare colors</h2>
+        <button type="button" id="compare-close" class="text-btn">Close</button>
+      </div>
+      <div class="compare-scope tool-group" role="radiogroup" aria-label="What to paint">
+        <button type="button" class="tool" role="radio" data-scope="selected" id="compare-scope-selected">This wall</button>
+        <button type="button" class="tool" role="radio" data-scope="walls">All walls</button>
+      </div>
+      <p class="hint compare-help">Choose up to four colors. Your favorites and recent colors are here; heart more colors to add them.</p>
+      <div id="compare-pick" class="compare-pick"></div>
+      <div id="compare-grid" class="compare-grid" aria-live="polite"></div>
+    </div>
+  </div>
+  <div id="share-dialog" class="collection" hidden>
+    <div class="collection-card share-card" role="dialog" aria-modal="true" aria-labelledby="share-title">
+      <div class="section-head">
+        <h2 id="share-title">Share before and after</h2>
+        <button type="button" id="share-close" class="text-btn">Close</button>
+      </div>
+      <p class="hint">Anyone with this link can see the before and after photos and the colors you chose. Search engines won't list it, and you can delete it anytime from Collection.</p>
+      <p id="share-busy" class="share-busy" role="status">Creating your link…</p>
+      <div id="share-ready" hidden>
+        <div class="share-link">
+          <input id="share-url" type="text" readonly aria-label="Share link" />
+          <button type="button" id="share-copy" class="solid-btn">Copy link</button>
+        </div>
+        <div class="share-actions">
+          <button type="button" id="share-native" class="text-btn" hidden>Share…</button>
+          <a id="share-open" class="text-btn" target="_blank" rel="noopener">Open</a>
+          <button type="button" id="share-delete" class="link-btn danger-link">Delete this link</button>
+        </div>
+      </div>
     </div>
   </div>
   <div id="signin" class="collection" hidden>

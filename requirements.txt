@@ -10,3 +10,4 @@ itsdangerous>=2.2
 google-auth>=2.35
 requests>=2.32
 replit-object-storage>=1.0
+onnxruntime>=1.20

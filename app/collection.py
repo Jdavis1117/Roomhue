@@ -153,6 +153,36 @@ def delete_room(user_id: str, room_id: str) -> None:
         files.delete(key)
 
 
+MAX_FAVORITES = 300
+
+
+def load_favorites(user_id: str) -> list[dict]:
+    raw = store().read(_prefix(user_id) + "favorites.json")
+    if raw is None:
+        return []
+    try:
+        favorites = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    return favorites if isinstance(favorites, list) else []
+
+
+def save_favorites(user_id: str, favorites: list[dict]) -> list[dict]:
+    """Replace the account's favorite colors, dropping duplicates and keeping the newest first."""
+    seen: set[str] = set()
+    kept = []
+    for color in favorites:
+        key = f"{color['brandId']}|{color['code']}".lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append({field: color[field] for field in ("brand", "brandId", "code", "name", "hex")})
+        if len(kept) >= MAX_FAVORITES:
+            break
+    store().write(_prefix(user_id) + "favorites.json", json.dumps(kept).encode("utf-8"))
+    return kept
+
+
 def record_consent(user_id: str, version: str) -> None:
     """Keep proof of which Terms and Privacy Policy version the account agreed to, and when."""
     key = _prefix(user_id) + "account.json"

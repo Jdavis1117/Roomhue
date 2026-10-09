@@ -1,6 +1,6 @@
 import numpy as np
 
-from app.color_math import lab_to_rgb, paint_lab, recolor_rgb, rgb_to_lab
+from app.color_math import blend_layers, lab_to_rgb, paint_lab, paint_layer, recolor_rgb, rgb_to_lab
 
 
 def test_red_lab_roundtrip():
@@ -44,3 +44,28 @@ def test_paint_lab_accepts_shade():
     base, _, _ = paint_lab("#F3F0E8", 0)
     lighter, _, _ = paint_lab("#F3F0E8", 8)
     assert lighter > base
+
+
+def test_two_walls_meeting_leave_no_seam_of_the_original_photo():
+    rgb = np.zeros((40, 80, 3), np.uint8)
+    rgb[:, :40] = (200, 190, 180)
+    rgb[:, 40:] = (150, 140, 130)
+    left = np.zeros((40, 80), np.uint8)
+    left[:, :40] = 255
+    right = 255 - left
+    layers = [paint_layer(rgb, mask, "#2F4A5C", coverage=1, sheen="matte") for mask in (left, right)]
+    out = blend_layers(rgb, layers).astype(np.float32)
+    painted = recolor_rgb(rgb, left, "#2F4A5C", coverage=1, sheen="matte").astype(np.float32)
+    seam = out[:, 38:42]
+    inside = painted[:, 10:30].mean(axis=(0, 1))
+    # Both sides are dark blue paint; the seam must not lighten toward the pale original walls.
+    assert float(np.abs(seam.mean(axis=(0, 1)) - inside).max()) < 25
+    assert float(seam.mean()) < 120
+
+
+def test_one_layer_matches_recolor():
+    rgb = np.full((20, 20, 3), 180, np.uint8)
+    mask = np.zeros((20, 20), np.uint8)
+    mask[5:15, 5:15] = 255
+    layer = paint_layer(rgb, mask, "#884422", coverage=0.7, sheen="satin")
+    assert np.array_equal(blend_layers(rgb, [layer]), recolor_rgb(rgb, mask, "#884422", coverage=0.7, sheen="satin"))

@@ -10,7 +10,11 @@ Try paint colors on a photo of a room before buying a can. Sign in with Google t
 4. Set the sheen (matte, eggshell, satin, semi-gloss), how fully the color covers, and a shade nudge lighter or darker than the chip.
 5. If a wall was missed or a sofa was included, fix the mask. The wand selects up to a hard edge such as a corner. The brush and eraser paint the mask directly. Hold Shift with the wand to add to the surface you already have selected.
 6. Drag Before / After to compare with the original photo, then download a PNG.
-7. Save puts the photo, the walls, and the colors into your collection. Saving asks you to sign in with Google first, and the collection belongs to that account: sign in again later, from any browser, and the rooms are there. Open Collection to change the colors again.
+7. Tap the heart on any color to add it to Favorites, which sit at the top of the color list. Signed in, favorites are saved to your Google account; otherwise they stay on this device.
+8. After you pick a paint, "Goes with" suggests a trim white, lighter and darker shades, and accents from the same brand, plus Sherwin-Williams' own pairings.
+9. Compare colors shows the same wall, or all walls, in up to four colors side by side.
+10. Share (signed in) makes a link with a before/after slider and the colors used. Anyone with the link can open it; delete it anytime from Collection.
+11. Save puts the photo, the walls, and the colors into your collection. Saving asks you to sign in with Google first, and the collection belongs to that account: sign in again later, from any browser, and the rooms are there. Open Collection to change the colors again.
 
 ## Run
 
@@ -52,9 +56,7 @@ Rooms are filed under the Google account's id. On Replit they go to Replit Objec
 
 ## How a photo becomes paint
 
-**Surfaces.** A photo is marked when it opens. The detector groups the picture into walls, ceiling, and floor, and leaves out small bright spots and furniture when it can. Dots still lets you add a wall by placing a point at each corner. The wand and brush can adjust a wall after it exists.
-
-The entry point is `detect_surfaces(image)`. A learned segmenter can replace the body of that function later without changing the studio.
+**Surfaces.** A photo is marked when it opens. A scene-parsing network (UperNet ConvNeXt-T, run with ONNX Runtime on the server) labels which pixels are wall, ceiling, and floor, so furniture, windows, doors, curtains, and art stay out. The wall area is then split into separate walls at the room's corners, and every wall pixel goes to exactly one wall so neighbours meet without a gap. Details, licenses, and how to rebuild the model are in `docs/wall-detection.md`. Dots still lets you add a wall by placing a point at each corner, and the wand and brush can adjust a wall after it exists.
 
 **Wand.** A click flood-fills across gradual light changes, which is what a single wall looks like, and stops at hard edges so it does not cross a corner.
 

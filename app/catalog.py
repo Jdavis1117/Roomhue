@@ -7,6 +7,10 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
+
+from app.color_math import rgb_to_lab
+
 ROOT = Path(__file__).resolve().parent.parent
 CATALOG_DIR = ROOT / "data" / "brands"
 
@@ -204,3 +208,84 @@ def _public(color: dict, brands: list[dict]) -> dict:
     if color.get("archived"):
         row["archived"] = True
     return row
+
+
+# ---------------------------------------------------------------- coordinating colors
+
+@lru_cache(maxsize=16)
+def _brand_lab(brand: str) -> tuple[list[dict], np.ndarray]:
+    """Current (non-archived) colors of one brand and their Lab values, for nearest-color lookups."""
+    rows = [color for color in _load()["colors"] if color["brand"] == brand and not color.get("archived")]
+    if not rows:
+        return [], np.zeros((0, 3), np.float32)
+    rgb = np.array([[int(color["hex"][i : i + 2], 16) for i in (1, 3, 5)] for color in rows], np.uint8)[None]
+    L, A, B = rgb_to_lab(rgb)
+    return rows, np.stack([L[0], A[0], B[0]], axis=1).astype(np.float32)
+
+
+def _hex_lab(hex_color: str) -> np.ndarray:
+    rgb = np.array([[[int(hex_color[i : i + 2], 16) for i in (1, 3, 5)]]], np.uint8)
+    L, A, B = rgb_to_lab(rgb)
+    return np.array([float(L[0, 0]), float(A[0, 0]), float(B[0, 0])], np.float32)
+
+
+def _lch_target(lightness: float, chroma: float, hue: float) -> np.ndarray:
+    return np.array([lightness, chroma * np.cos(hue), chroma * np.sin(hue)], np.float32)
+
+
+def coordinates(brand: str, code: str) -> dict | None:
+    """Colors that go with one paint: the brand's own pairings when it publishes them, plus a
+    matching trim white, a lighter and a darker shade, and two accents from the same brand."""
+    payload = _load()
+    brand = brand.strip().lower()
+    key = _code_key(code)
+    base = next((color for color in payload["colors"] if color["brand"] == brand and color["code_key"] == key), None)
+    if base is None:
+        return None
+    brands = payload["brands"]
+    by_code = {color["code"]: color for color in payload["colors"] if color["brand"] == brand}
+    official = [by_code[pair] for pair in base.get("pairs", []) if pair in by_code]
+
+    rows, labs = _brand_lab(brand)
+    lightness, a, b = (float(value) for value in _hex_lab(base["hex"]))
+    chroma = float(np.hypot(a, b))
+    # Very gray colors have no reliable hue; lean slightly warm, as most whites and neutrals do.
+    hue = float(np.arctan2(b, a)) if chroma > 2.5 else np.radians(80)
+    neutral = chroma < 10
+
+    targets = [
+        ("Trim white", _lch_target(94.0, min(chroma * 0.25, 5.0), hue), lambda lab: lab[0] >= 88 and np.hypot(lab[1], lab[2]) <= 10),
+        ("Lighter", _lch_target(min(96.0, lightness + 18), chroma * 0.75, hue), None),
+        ("Darker", _lch_target(max(14.0, lightness - 24), min(chroma * 1.1, 60.0), hue), None),
+    ]
+    if neutral:
+        # A neutral wall pairs well with a deep, quieter color opposite its undertone, and with a soft green.
+        targets.append(("Accent", _lch_target(36.0, 22.0, hue + np.pi), None))
+        targets.append(("Accent", _lch_target(55.0, 18.0, np.radians(135)), None))
+    else:
+        targets.append(("Accent", _lch_target(float(np.clip(lightness, 35, 62)), min(chroma, 32.0), hue + np.pi), None))
+        targets.append(("Accent", _lch_target(max(25.0, lightness - 10), max(chroma, 15.0), hue + np.radians(35)), None))
+
+    taken = {base["code"], *[color["code"] for color in official]}
+    suggested = []
+    for role, target, allowed in targets:
+        if not rows:
+            break
+        distance = np.sqrt(((labs - target) ** 2).sum(axis=1))
+        for index in np.argsort(distance)[:40]:
+            color = rows[int(index)]
+            if color["code"] in taken or (allowed and not allowed(labs[int(index)])):
+                continue
+            taken.add(color["code"])
+            suggested.append({**_public(color, brands), "role": role})
+            break
+
+    def official_role(color: dict) -> str:
+        lab = _hex_lab(color["hex"])
+        return "Coordinating white" if lab[0] >= 88 and np.hypot(lab[1], lab[2]) <= 10 else "Designer pairing"
+
+    return {
+        "color": _public(base, brands),
+        "official": [{**_public(color, brands), "role": official_role(color)} for color in official],
+        "suggested": suggested,
+    }

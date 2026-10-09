@@ -20,7 +20,7 @@ def test_sample_session_detects_surfaces():
     body = response.json()
     kinds = {surface["kind"] for surface in body["surfaces"]}
     assert {"wall", "floor", "ceiling"} <= kinds
-    assert body["width"] == 1200
+    assert body["width"] == 1400
     assert body["session_id"]
 
 
@@ -102,7 +102,9 @@ def test_lines_split_the_photo():
 
 @pytest.fixture
 def signed_in(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.collection.store", lambda: DiskStore(tmp_path))
+    test_store = DiskStore(tmp_path)
+    for module in ("app.collection", "app.shares"):
+        monkeypatch.setattr(f"{module}.store", lambda: test_store)
 
     def sign_in(user_id="user-1"):
         monkeypatch.setattr(
@@ -295,3 +297,119 @@ def test_home_page_does_not_load_google_until_sign_in():
     page = client.get("/").text
     assert "accounts.google.com" not in page
     assert 'id="consent"' in page and 'id="agree"' in page
+
+
+FAVORITE = {"brand": "Sherwin-Williams", "brandId": "sherwin-williams", "code": "SW7029", "name": "Agreeable Gray", "hex": "#D1CBC1"}
+
+
+def test_favorites_need_sign_in():
+    browser = TestClient(app)
+    assert browser.get("/api/favorites").status_code == 401
+    assert browser.put("/api/favorites", json={"favorites": [FAVORITE]}).status_code == 401
+
+
+def test_favorites_save_and_reload_per_account(signed_in):
+    first = signed_in("user-1")
+    assert first.get("/api/favorites").json() == {"favorites": []}
+    custom = {"brand": "Custom", "brandId": "custom", "code": "#336699", "name": "#336699", "hex": "#336699"}
+    saved = first.put("/api/favorites", json={"favorites": [FAVORITE, custom, dict(FAVORITE)]})
+    assert saved.status_code == 200
+    assert saved.json()["favorites"] == [FAVORITE, custom]
+    later = signed_in("user-1")
+    assert later.get("/api/favorites").json()["favorites"] == [FAVORITE, custom]
+    other = signed_in("user-2")
+    assert other.get("/api/favorites").json()["favorites"] == []
+
+
+def test_favorites_reject_bad_colors(signed_in):
+    browser = signed_in()
+    assert browser.put("/api/favorites", json={"favorites": [{**FAVORITE, "hex": "red"}]}).status_code == 422
+    assert browser.put("/api/favorites", json={"favorites": [{**FAVORITE, "name": "x" * 200}]}).status_code == 422
+    too_many = [{**FAVORITE, "code": f"SW{i}"} for i in range(301)]
+    assert browser.put("/api/favorites", json={"favorites": too_many}).status_code == 422
+
+
+def test_deleting_account_removes_favorites(signed_in):
+    browser = signed_in("user-1")
+    browser.put("/api/favorites", json={"favorites": [FAVORITE]})
+    browser.delete("/api/account")
+    again = signed_in("user-1")
+    assert again.get("/api/favorites").json()["favorites"] == []
+
+
+def test_coordinating_colors_include_official_pairings_and_suggestions():
+    body = client.get("/api/colors/coordinate", params={"brand": "sherwin-williams", "code": "SW7029"}).json()
+    assert body["color"]["name"] == "Agreeable Gray"
+    assert [color["code"] for color in body["official"]] == ["SW7006", "SW9004", "SW7028"]
+    roles = [color["role"] for color in body["suggested"]]
+    assert roles[:3] == ["Trim white", "Lighter", "Darker"] and roles.count("Accent") == 2
+    codes = [color["code"] for color in body["official"] + body["suggested"]]
+    assert len(codes) == len(set(codes)) and "SW7029" not in codes
+    assert all(color["brandId"] == "sherwin-williams" for color in body["suggested"])
+
+
+def test_coordinating_colors_work_for_brands_without_official_pairings():
+    body = client.get("/api/colors/coordinate", params={"brand": "behr", "code": "N240-1"}).json()
+    assert body["official"] == []
+    assert len(body["suggested"]) == 5
+    assert client.get("/api/colors/coordinate", params={"brand": "behr", "code": "NOPE"}).status_code == 404
+
+
+def _jpeg(color, size=(60, 90)):
+    image = np.zeros((size[0], size[1], 3), np.uint8)
+    image[:] = color
+    return cv2.imencode(".jpg", image)[1].tobytes()
+
+
+def _share(browser, name="Living room", colors=None):
+    meta = {"name": name, "colors": colors if colors is not None else [{"surface": "Wall 1", "name": "Agreeable Gray", "label": "Sherwin-Williams SW7029 Agreeable Gray", "hex": "#D1CBC1"}]}
+    return browser.post(
+        "/api/shares",
+        files={"before": ("before.jpg", _jpeg((200, 200, 200)), "image/jpeg"), "after": ("after.jpg", _jpeg((90, 120, 160)), "image/jpeg")},
+        data={"meta": json.dumps(meta)},
+    )
+
+
+def test_sharing_needs_sign_in(signed_in):
+    assert _share(TestClient(app)).status_code == 401
+
+
+def test_shared_link_is_public_and_can_be_deleted(signed_in):
+    owner = signed_in("user-1")
+    created = _share(owner, name="Living <room>")
+    assert created.status_code == 200, created.text
+    token = created.json()["token"]
+    stranger = TestClient(app)
+    page = stranger.get(f"/s/{token}")
+    assert page.status_code == 200
+    assert "Living &lt;room&gt;" in page.text and "<room>" not in page.text
+    assert "Agreeable Gray" in page.text and "#D1CBC1" in page.text
+    assert "noindex" in page.headers["x-robots-tag"]
+    assert stranger.get(f"/s/{token}/after.jpg").headers["content-type"] == "image/jpeg"
+    assert stranger.get(f"/s/{token}/secret.jpg").status_code == 404
+    assert [share["token"] for share in owner.get("/api/shares").json()] == [token]
+    assert signed_in("user-2").delete(f"/api/shares/{token}").status_code == 404
+    assert owner.delete(f"/api/shares/{token}").status_code == 200
+    assert stranger.get(f"/s/{token}").status_code == 404
+
+
+def test_shares_reject_bad_input(signed_in):
+    browser = signed_in()
+    bad = browser.post("/api/shares", files={"before": ("b.jpg", b"nope", "image/jpeg"), "after": ("a.jpg", _jpeg((1, 2, 3)), "image/jpeg")})
+    assert bad.status_code == 400
+    mismatch = browser.post(
+        "/api/shares",
+        files={"before": ("b.jpg", _jpeg((1, 2, 3), (60, 90)), "image/jpeg"), "after": ("a.jpg", _jpeg((1, 2, 3), (40, 90)), "image/jpeg")},
+    )
+    assert mismatch.status_code == 400
+    weird = _share(browser, colors=[{"hex": "javascript:alert(1)"}, {"hex": "#123456", "name": "<b>x</b>"}])
+    page = TestClient(app).get(f"/s/{weird.json()['token']}").text
+    assert "javascript:" not in page and "<b>x</b>" not in page and "&lt;b&gt;x&lt;/b&gt;" in page
+    assert TestClient(app).get("/s/../../etc").status_code == 404
+
+
+def test_deleting_account_removes_shared_links(signed_in):
+    owner = signed_in("user-1")
+    token = _share(owner).json()["token"]
+    owner.delete("/api/account")
+    assert TestClient(app).get(f"/s/{token}").status_code == 404

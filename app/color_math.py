@@ -100,19 +100,20 @@ def feather_alpha(mask: np.ndarray, coverage: float) -> np.ndarray:
     return np.clip(alpha * float(coverage), 0.0, 1.0)
 
 
-def recolor_rgb(
+def paint_layer(
     rgb: np.ndarray,
     mask: np.ndarray,
     color: str,
     coverage: float = 0.92,
     sheen: str = "eggshell",
     shade: float = 0.0,
-) -> np.ndarray:
-    """Replace masked pixels with paint, keeping shadows and texture.
+) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """One surface's paint over the whole photo, plus its softened edge weight.
 
     Lightness is shifted toward the chip but the wall's light/dark pattern
     stays. Chroma moves to the paint color, with a little of the original
     variation left so flat color doesn't erase plaster and light falloff.
+    Returns None when there is nothing to paint.
     """
     if sheen not in SHEEN_AMOUNT:
         raise ValueError(f"Unknown sheen {sheen!r}")
@@ -120,11 +121,9 @@ def recolor_rgb(
     shade = float(np.clip(shade, -20.0, 20.0))
     if mask.shape[:2] != rgb.shape[:2]:
         raise ValueError("Mask and image sizes differ")
-
-    alpha = feather_alpha(mask, coverage)
     region = mask >= 128
     if not np.any(region) or coverage <= 0:
-        return rgb.copy()
+        return None
 
     L, A, B = rgb_to_lab(rgb)
     med_L = float(np.median(L[region]))
@@ -143,7 +142,43 @@ def recolor_rgb(
         highlight = np.clip((L - med_L) / 28.0, 0, 2.0) ** 2
         spec = (highlight * shine).astype(np.float32)
         painted += (255.0 - painted) * spec[..., None]
+    return painted, feather_alpha(mask, 1.0), coverage
 
+
+def blend_layers(rgb: np.ndarray, layers: list[tuple[np.ndarray, np.ndarray, float]]) -> np.ndarray:
+    """Composite painted surfaces onto the photo.
+
+    Where two surfaces meet, both softened edges are partly on. Their weights
+    are shared out instead of stacked, so the seam takes paint from the two
+    walls and none of the original photo shows through between them.
+    """
     base = rgb.astype(np.float32)
-    out = base * (1.0 - alpha[..., None]) + painted * alpha[..., None]
+    if not layers:
+        return rgb.copy()
+    total = np.zeros(rgb.shape[:2], np.float32)
+    covered = np.zeros(rgb.shape[:2], np.float32)
+    color = np.zeros(rgb.shape, np.float32)
+    for painted, edge, coverage in layers:
+        total += edge
+        covered += edge * coverage
+        color += painted * edge[..., None]
+    on = total > 0
+    safe = np.where(on, total, 1.0)
+    alpha = np.minimum(total, 1.0) * (covered / safe)
+    mix = color / safe[..., None]
+    out = base * (1.0 - alpha[..., None]) + mix * alpha[..., None]
+    out[~on] = base[~on]
     return np.clip(np.round(out), 0, 255).astype(np.uint8)
+
+
+def recolor_rgb(
+    rgb: np.ndarray,
+    mask: np.ndarray,
+    color: str,
+    coverage: float = 0.92,
+    sheen: str = "eggshell",
+    shade: float = 0.0,
+) -> np.ndarray:
+    """Replace masked pixels with paint, keeping shadows and texture."""
+    layer = paint_layer(rgb, mask, color, coverage, sheen, shade)
+    return blend_layers(rgb, [layer]) if layer else rgb.copy()

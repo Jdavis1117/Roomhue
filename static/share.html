@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>{{TITLE}} · RoomRoller</title>
+  <meta property="og:title" content="{{TITLE}} · painted with RoomRoller" />
+  <meta property="og:description" content="Before and after paint colors for this room." />
+  <meta property="og:image" content="{{IMAGE}}" />
+  <meta property="og:url" content="{{URL}}" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="stylesheet" href="/static/legal/legal.css" />
+  <style>
+    main { max-width: 980px; }
+    .compare { position: relative; margin: 16px 0 8px; border-radius: 12px; overflow: hidden; background: #e7e1d8; touch-action: pan-y; }
+    .compare img { display: block; width: 100%; height: auto; }
+    .compare .after { position: absolute; inset: 0; clip-path: inset(0 0 0 var(--cut, 50%)); }
+    .compare .line { position: absolute; top: 0; bottom: 0; left: var(--cut, 50%); width: 2px; background: #fffcf8; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); pointer-events: none; }
+    .tag { position: absolute; top: 10px; padding: 4px 10px; border-radius: 999px; background: rgba(28, 25, 23, 0.7); color: #fff; font-size: 0.8rem; }
+    .tag.before { left: 10px; }
+    .tag.after-tag { right: 10px; }
+    .slider { width: 100%; accent-color: #c45c26; height: 32px; }
+    .colors { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 10px; }
+    .colors li { display: flex; gap: 12px; align-items: center; }
+    .colors .chip { width: 40px; height: 40px; border-radius: 10px; border: 1px solid rgba(0, 0, 0, 0.12); flex: 0 0 auto; }
+    .colors small { display: block; color: var(--muted); }
+    .cta { display: inline-block; margin-top: 20px; padding: 10px 18px; border-radius: 999px; background: #1c1917; color: #f7f3ee; text-decoration: none; font-weight: 600; }
+    .note { color: var(--muted); font-size: 0.85rem; margin-top: 18px; }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header><a href="/">RoomRoller</a></header>
+  <main id="content">
+    <h1>{{TITLE}}</h1>
+    <p class="meta">Drag to compare before and after.</p>
+    <div class="compare" id="compare" style="aspect-ratio: {{WIDTH}} / {{HEIGHT}}">
+      <img src="/s/{{TOKEN}}/before.jpg" alt="{{TITLE}} before painting" width="{{WIDTH}}" height="{{HEIGHT}}" />
+      <img class="after" src="/s/{{TOKEN}}/after.jpg" alt="{{TITLE}} with the new paint colors" width="{{WIDTH}}" height="{{HEIGHT}}" />
+      <span class="line" aria-hidden="true"></span>
+      <span class="tag before" aria-hidden="true">Before</span>
+      <span class="tag after-tag" aria-hidden="true">After</span>
+    </div>
+    <input class="slider" id="slider" type="range" min="0" max="100" value="50" aria-label="Before and after: drag right to see more of the original photo" />
+    <h2>Paint colors</h2>
+    <ul class="colors">{{COLORS}}</ul>
+    <a class="cta" href="/">Try paint colors on your own room</a>
+    <p class="note">Colors on screen are approximate. Check a physical sample before buying paint.</p>
+  </main>
+  <footer>
+    <nav aria-label="Legal">
+      <a href="/">RoomRoller</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+    </nav>
+  </footer>
+  <script>
+    (() => {
+      const box = document.getElementById("compare");
+      const slider = document.getElementById("slider");
+      const set = (value) => box.style.setProperty("--cut", `${value}%`);
+      slider.addEventListener("input", () => set(slider.value));
+      const drag = (event) => {
+        const rect = box.getBoundingClientRect();
+        const value = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100));
+        slider.value = String(Math.round(value));
+        set(value);
+      };
+      box.addEventListener("pointerdown", (event) => {
+        box.setPointerCapture(event.pointerId);
+        drag(event);
+        box.addEventListener("pointermove", drag);
+      });
+      box.addEventListener("pointerup", () => box.removeEventListener("pointermove", drag));
+      box.addEventListener("pointercancel", () => box.removeEventListener("pointermove", drag));
+    })();
+  </script>
+</body>
+</html>
