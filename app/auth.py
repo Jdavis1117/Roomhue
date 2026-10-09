@@ -15,6 +15,8 @@ from fastapi import HTTPException, Request
 
 ROOT = Path(__file__).resolve().parent.parent
 SESSION_DAYS = 60
+# Bump when the Terms or Privacy Policy change in a way people must agree to again.
+LEGAL_VERSION = "2026-10-09"
 
 
 def load_env_file() -> None:
@@ -60,17 +62,15 @@ def verify_google_token(credential: str) -> dict:
         raise HTTPException(status_code=401, detail="Google sign-in didn't go through. Try again.") from exc
     if not claims.get("sub"):
         raise HTTPException(status_code=401, detail="Google sign-in didn't go through. Try again.")
-    return {
-        "id": str(claims["sub"]),
-        "email": claims.get("email", ""),
-        "name": claims.get("name") or claims.get("email", ""),
-        "picture": claims.get("picture", ""),
-    }
+    # Keep only what the app uses: the stable account id and a display name. No email or photo.
+    return {"id": str(claims["sub"]), "name": claims.get("given_name") or claims.get("name") or "You"}
 
 
 def current_user(request: Request) -> dict | None:
     user = request.session.get("user")
-    return user if isinstance(user, dict) and user.get("id") else None
+    if not isinstance(user, dict) or not user.get("id"):
+        return None
+    return {"id": str(user["id"]), "name": str(user.get("name") or "You")}
 
 
 def require_user(request: Request) -> str:

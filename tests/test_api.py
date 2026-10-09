@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from app.auth import LEGAL_VERSION
 from app.main import app
 from app.storage import DiskStore
 from app.sample_room import make_sample_room
@@ -106,10 +107,13 @@ def signed_in(tmp_path, monkeypatch):
     def sign_in(user_id="user-1"):
         monkeypatch.setattr(
             "app.auth.verify_google_token",
-            lambda credential: {"id": user_id, "email": f"{user_id}@example.com", "name": user_id, "picture": ""},
+            lambda credential: {"id": user_id, "name": user_id},
         )
         browser = TestClient(app)
-        response = browser.post("/api/auth/google", json={"credential": "token"})
+        response = browser.post(
+            "/api/auth/google",
+            json={"credential": "token", "accepted_terms": True, "terms_version": LEGAL_VERSION},
+        )
         assert response.status_code == 200, response.text
         return browser
 
@@ -234,3 +238,60 @@ def test_collection_imports_saved_folders(signed_in):
     opened = browser.post(f"/api/collection/{listed['LivingRoom2']['id']}/open")
     assert opened.status_code == 200
     assert len(opened.json()["surfaces"]) == 4
+
+
+def test_sign_in_requires_agreeing_to_terms(signed_in, monkeypatch):
+    monkeypatch.setattr("app.auth.verify_google_token", lambda credential: {"id": "user-9", "name": "Pat"})
+    browser = TestClient(app)
+    refused = browser.post("/api/auth/google", json={"credential": "token"})
+    assert refused.status_code == 400
+    stale = browser.post("/api/auth/google", json={"credential": "token", "accepted_terms": True, "terms_version": "2000-01-01"})
+    assert stale.status_code == 400
+    assert browser.get("/api/auth/me").json()["user"] is None
+
+
+def test_sign_in_keeps_only_id_and_name_and_records_consent(signed_in, tmp_path):
+    browser = signed_in("user-1")
+    me = browser.get("/api/auth/me").json()
+    assert me["user"] == {"id": "user-1", "name": "user-1"}
+    assert me["legal_version"] == LEGAL_VERSION
+    record = json.loads((tmp_path / "users" / "user-1" / "account.json").read_text())
+    assert record["terms_version"] == LEGAL_VERSION
+    assert record["accepted_at"] and record["first_accepted_at"]
+
+
+def test_old_session_fields_are_not_exposed(signed_in, monkeypatch):
+    monkeypatch.setattr(
+        "app.auth.verify_google_token",
+        lambda credential: {"id": "user-3", "name": "Sam", "email": "sam@example.com", "picture": "https://x"},
+    )
+    browser = TestClient(app)
+    browser.post("/api/auth/google", json={"credential": "t", "accepted_terms": True, "terms_version": LEGAL_VERSION})
+    assert browser.get("/api/auth/me").json()["user"] == {"id": "user-3", "name": "Sam"}
+
+
+def test_delete_account_removes_everything_and_signs_out(signed_in, tmp_path):
+    browser = signed_in("user-1")
+    browser.post(f"/api/sessions/{_session(browser)}/collection", json=_room_payload())
+    other = signed_in("user-2")
+    other.post(f"/api/sessions/{_session(other)}/collection", json=_room_payload())
+    deleted = browser.delete("/api/account")
+    assert deleted.status_code == 200 and deleted.json()["removed"] >= 5
+    assert not [path for path in (tmp_path / "users" / "user-1").rglob("*") if path.is_file()]
+    assert browser.get("/api/auth/me").json()["user"] is None
+    assert browser.delete("/api/account").status_code == 401
+    assert len(other.get("/api/collection").json()) == 1
+
+
+def test_legal_pages_are_served():
+    for path, title in (("/privacy", "Privacy Policy"), ("/terms", "Terms of Service"), ("/cookies", "Cookie Policy")):
+        page = client.get(path)
+        assert page.status_code == 200
+        assert f"<h1>{title}</h1>" in page.text
+        assert "privacy@roomroller.com" in page.text
+
+
+def test_home_page_does_not_load_google_until_sign_in():
+    page = client.get("/").text
+    assert "accounts.google.com" not in page
+    assert 'id="consent"' in page and 'id="agree"' in page

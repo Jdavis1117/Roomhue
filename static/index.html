@@ -30,14 +30,21 @@
         <button type="button" id="export-btn" class="solid-btn" disabled>Download</button>
         <input id="file" type="file" accept="image/*" hidden />
         <div id="account" class="account">
-          <div id="account-google" class="account-google"></div>
+          <button type="button" id="signin-btn" class="text-btn" hidden>Sign in</button>
           <button type="button" id="account-off" class="text-btn" disabled hidden title="Google sign-in isn't set up on this server yet.">Sign in</button>
           <div id="account-user" class="account-user" hidden>
-            <img id="account-avatar" alt="" referrerpolicy="no-referrer" />
+            <span id="account-initial" class="account-initial" aria-hidden="true"></span>
             <span id="account-name"></span>
             <button type="button" id="signout-btn" class="text-btn">Sign out</button>
+            <button type="button" id="delete-account-btn" class="text-btn delete-account">Delete account and data</button>
           </div>
         </div>
+        <nav class="menu-legal" aria-label="Menu policy links">
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
+          <a href="/cookies">Cookies</a>
+          <button type="button" class="link-btn" data-cookie-settings>Cookie settings</button>
+        </nav>
       </div>
     </header>
 
@@ -47,18 +54,30 @@
           <p class="eyebrow">Paint preview</p>
           <h2 id="empty-title">Drop a room photo here.</h2>
           <p class="lede">Walls are marked when the photo opens, and you can place dots to add another wall. The light in the photo stays. Sign in with Google to keep rooms in your collection.</p>
+          <p class="fine-print">Photos you open are sent to RoomRoller's server to find the walls, kept in memory for up to two hours, and only stored if you save a room. See the <a href="/privacy">Privacy Policy</a>.</p>
           <div class="empty-actions">
             <button type="button" id="empty-open" class="solid-btn">Browse photos</button>
             <button type="button" id="empty-sample" class="text-btn">Use the sample room</button>
             <button type="button" id="empty-collection" class="text-btn">Collection</button>
           </div>
+          <nav class="legal-links" aria-label="Policies">
+            <a href="/privacy">Privacy</a>
+            <a href="/terms">Terms</a>
+            <a href="/cookies">Cookies</a>
+            <button type="button" class="link-btn" data-cookie-settings>Cookie settings</button>
+          </nav>
         </div>
 
         <div id="studio" class="studio" hidden>
           <div id="stage" class="stage">
-            <canvas id="view"></canvas>
+            <canvas id="view" role="img" aria-label="Your room photo with the paint preview"></canvas>
             <button type="button" id="hold-compare" class="hold-compare">Hold for before</button>
-            <div id="brush-cursor" class="brush-cursor" hidden></div>
+            <div class="photo-history">
+              <button type="button" id="m-undo" class="photo-btn" aria-label="Undo" disabled>&#8630;</button>
+              <button type="button" id="m-redo" class="photo-btn" aria-label="Redo" disabled>&#8631;</button>
+            </div>
+            <button type="button" id="edit-toggle" class="photo-btn photo-edit" aria-pressed="false">Edit</button>
+            <div id="brush-cursor" class="brush-cursor" aria-hidden="true" hidden></div>
           </div>
           <div class="toolbar">
             <div class="tool-group" role="toolbar" aria-label="Mask tools">
@@ -104,7 +123,7 @@
       </section>
 
       <aside class="panel">
-        <div id="panel-resize" class="panel-resize" role="separator" aria-orientation="vertical" aria-label="Drag to resize the color pane" tabindex="0"></div>
+        <div id="panel-resize" class="panel-resize" role="separator" aria-orientation="vertical" aria-label="Drag to resize the color pane" aria-valuemin="300" aria-valuemax="1200" aria-valuenow="840" tabindex="0"></div>
         <div id="sheet-handle" class="sheet-handle" role="button" tabindex="0" aria-label="Drag to resize the panel"><span></span></div>
         <nav id="sheet-tabs" class="sheet-tabs" role="tablist" aria-label="Panels">
           <button type="button" role="tab" data-sheet="fold-brands">Colors</button>
@@ -114,11 +133,11 @@
         </nav>
 
         <details class="fold" id="fold-surfaces">
-          <summary>
-            <span>Surfaces</span>
-            <button type="button" id="add-surface" class="text-btn" disabled>Add wall</button>
-          </summary>
+          <summary><span>Surfaces</span></summary>
           <div class="fold-body">
+            <div class="fold-actions">
+              <button type="button" id="add-surface" class="text-btn" disabled>Add wall</button>
+            </div>
             <ul id="surface-list" class="surface-list"></ul>
             <p class="hint">Each tint is its own surface. Uncheck one to leave it out. Use Dots to add a wall that was missed.</p>
           </div>
@@ -162,15 +181,19 @@
         </details>
 
         <details class="fold brand-fold" id="fold-brands" open>
-          <summary>
-            <span>Brand paints</span>
-            <button type="button" id="clear-color" class="text-btn" disabled>Clear</button>
-          </summary>
+          <summary><span>Brand paints</span></summary>
           <div class="brand-body">
-            <input id="search" type="search" placeholder="Search name or code, like Repose Gray or SW7029" autocomplete="off" />
+            <div class="search-row">
+              <input id="search" type="search" placeholder="Search name or code, like Repose Gray or SW7029" autocomplete="off" />
+              <select id="brand-select" class="brand-select" aria-label="Brand"></select>
+            </div>
             <div id="families" class="families"></div>
-            <p id="color-count" class="hint"></p>
-            <div id="swatches" class="swatches" role="listbox" aria-label="Paint colors"></div>
+            <div id="group-chips" class="group-chips" role="tablist" aria-label="Color families"></div>
+            <div class="count-row">
+              <p id="color-count" class="hint"></p>
+              <button type="button" id="clear-color" class="text-btn" disabled>Clear color</button>
+            </div>
+            <div id="swatches" class="swatches" role="group" aria-label="Paint colors"></div>
             <button type="button" id="color-more" class="text-btn" hidden>More colors</button>
             <details class="note-fold">
               <summary>About these colors</summary>
@@ -178,6 +201,13 @@
             </details>
           </div>
         </details>
+
+        <nav class="legal-links panel-legal" aria-label="Policy links">
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
+          <a href="/cookies">Cookies</a>
+          <button type="button" class="link-btn" data-cookie-settings>Cookie settings</button>
+        </nav>
 
         <details class="fold keys">
           <summary><span>Shortcuts</span></summary>
@@ -198,29 +228,44 @@
     </main>
   </div>
   <div id="collection" class="collection" hidden>
-    <div class="collection-card">
+    <div class="collection-card" role="dialog" aria-modal="true" aria-labelledby="collection-title">
       <div class="section-head">
-        <h2>Collection</h2>
+        <h2 id="collection-title">Collection</h2>
         <button type="button" id="collection-close" class="text-btn">Close</button>
       </div>
       <label class="text-btn collection-upload" for="collection-upload">Upload a saved room</label>
       <input id="collection-upload" type="file" accept=".json,.png,.jpg" webkitdirectory directory multiple hidden />
       <ul id="collection-list" class="collection-list"></ul>
+      <p class="collection-foot">
+        <button type="button" id="collection-delete-account" class="link-btn danger-link">Delete account and data</button>
+      </p>
     </div>
   </div>
   <div id="signin" class="collection" hidden>
-    <div class="collection-card signin-card">
+    <div class="collection-card signin-card" role="dialog" aria-modal="true" aria-labelledby="signin-title">
       <div class="section-head">
-        <h2>Sign in to save</h2>
+        <h2 id="signin-title">Sign in to save</h2>
         <button type="button" id="signin-close" class="text-btn">Close</button>
       </div>
-      <p class="hint">Your collection is tied to your Google account, so saved rooms are there whenever you sign in.</p>
-      <div id="signin-button" class="signin-button"></div>
+      <p class="hint">Your collection is tied to your Google account, so saved rooms are there whenever you sign in. RoomRoller keeps only your account ID and first name.</p>
+      <label class="agree">
+        <input type="checkbox" id="agree" />
+        <span>I agree to the <a href="/terms" target="_blank" rel="noopener">Terms of Service</a> and <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</span>
+      </label>
+      <p class="fine-print">Continuing loads Google's sign-in service, which may set its own cookies. See the <a href="/cookies" target="_blank" rel="noopener">Cookie Policy</a>.</p>
+      <div id="signin-button" class="signin-button" aria-live="polite"><p class="hint">Check the box above to continue with Google.</p></div>
       <p id="signin-problem" class="hint" hidden></p>
     </div>
   </div>
+  <div id="consent" class="consent" role="region" aria-labelledby="consent-title" hidden>
+    <p id="consent-title" class="consent-title">Cookies and storage</p>
+    <p>RoomRoller uses one cookie to keep you signed in. With your OK, it also remembers your recent colors on this device. There are no ads or tracking. <a href="/cookies">Cookie Policy</a></p>
+    <div class="consent-actions">
+      <button type="button" id="consent-all" class="solid-btn">Allow preferences</button>
+      <button type="button" id="consent-essential" class="text-btn">Essential only</button>
+    </div>
+  </div>
   <div id="toast" class="toast" role="status"></div>
-  <script src="https://accounts.google.com/gsi/client" async></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

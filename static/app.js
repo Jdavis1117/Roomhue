@@ -7,6 +7,9 @@ const TINTS = ["#e07a3d", "#2f6f62", "#3d5e8c", "#8c4d6a", "#a6843d", "#4f6b52"]
 const D65 = [0.95047, 1, 1.08883];
 const DELTA = 6 / 29;
 const RECENT_KEY = "roomhue-recent";
+const PANEL_KEY = "roomhue-panel-width";
+const CONSENT_KEY = "roomroller-consent";
+const GOOGLE_SCRIPT = "https://accounts.google.com/gsi/client";
 
 const state = {
   sessionId: null,
@@ -29,6 +32,9 @@ const state = {
   collectionId: null,
   user: null,
   clientId: "",
+  legalVersion: "",
+  googleReady: null,
+  recentMemory: [],
   afterSignIn: null,
   collectionName: "",
   tolerance: 16,
@@ -69,6 +75,8 @@ const state = {
   lastTap: null,
   lastPointerType: "mouse",
   sheet: "half",
+  editing: false,
+  mobileGroup: "",
   sheetTab: "fold-brands",
 };
 
@@ -221,13 +229,45 @@ function sampleMask(canvas, x, y) {
   return pixel[3] > 128;
 }
 
+function consent() {
+  try {
+    const value = JSON.parse(localStorage.getItem(CONSENT_KEY) || "null");
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function preferencesAllowed() {
+  return Boolean(consent()?.preferences);
+}
+
+function setConsent(preferences) {
+  localStorage.setItem(CONSENT_KEY, JSON.stringify({ preferences, at: new Date().toISOString() }));
+  if (!preferences) {
+    state.recentMemory = loadRecent();
+    localStorage.removeItem(RECENT_KEY);
+    localStorage.removeItem(PANEL_KEY);
+  } else if (state.recentMemory.length) {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(state.recentMemory));
+  }
+  $("consent").hidden = true;
+}
+
+function showConsent() {
+  $("consent").hidden = false;
+  $("consent-all").focus();
+}
+
 function rememberColor(hex) {
   const next = [hex.toUpperCase(), ...loadRecent().filter((item) => item !== hex.toUpperCase())].slice(0, 8);
-  localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  state.recentMemory = next;
+  if (preferencesAllowed()) localStorage.setItem(RECENT_KEY, JSON.stringify(next));
   renderRecent();
 }
 
 function loadRecent() {
+  if (!preferencesAllowed()) return state.recentMemory;
   try {
     const parsed = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
     return Array.isArray(parsed) ? parsed : [];
@@ -290,6 +330,8 @@ function redo() {
 function syncHistoryButtons() {
   $("undo-btn").disabled = state.undo.length === 0;
   $("redo-btn").disabled = state.redo.length === 0;
+  $("m-undo").disabled = state.undo.length === 0;
+  $("m-redo").disabled = state.redo.length === 0;
 }
 
 function freshVersion() {
@@ -363,6 +405,7 @@ async function adoptSession(payload, keepPhoto) {
   redraw();
   warmSurfaces();
   if (!keepPhoto) setTool(payload.surfaces.length ? "select" : "dots");
+  if (!keepPhoto && isMobile() && payload.surfaces.length) toast("Tap a wall, then pick a color below.");
   else setStatus();
 }
 
@@ -909,6 +952,19 @@ function renderBrands() {
     });
     wrap.appendChild(button);
   });
+  const select = $("brand-select");
+  select.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "All brands";
+  select.appendChild(all);
+  state.brands.forEach((brand) => {
+    const option = document.createElement("option");
+    option.value = brand.id;
+    option.textContent = brand.name;
+    select.appendChild(option);
+  });
+  select.value = state.brand;
 }
 
 const PAINT_GROUPS = ["Whites", "Grays", "Blacks", "Browns", "Reds", "Oranges", "Yellows", "Greens", "Blues", "Purples", "Pinks"];
@@ -937,6 +993,41 @@ function renderSwatches() {
   grouped.forEach((_colors, name) => {
     if (!names.includes(name)) names.push(name);
   });
+  const chips = $("group-chips");
+  chips.innerHTML = "";
+  if (isMobile()) {
+    // Phones show one color family at a time, chosen from a chip row, so the grid gets the room.
+    if (!names.includes(state.mobileGroup)) state.mobileGroup = names[0] || "";
+    names.forEach((name) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = `group-chip${name === state.mobileGroup ? " is-on" : ""}`;
+      chip.setAttribute("role", "tab");
+      chip.setAttribute("aria-selected", String(name === state.mobileGroup));
+      const label = document.createElement("span");
+      label.textContent = name;
+      const count = document.createElement("small");
+      count.textContent = grouped.get(name).length.toLocaleString();
+      chip.append(label, count);
+      chip.addEventListener("click", () => {
+        state.mobileGroup = name;
+        renderSwatches();
+        $("swatches").scrollTop = 0;
+      });
+      chips.appendChild(chip);
+    });
+    const grid = document.createElement("div");
+    grid.className = "group-paints";
+    const active = selected();
+    const fragment = document.createDocumentFragment();
+    (grouped.get(state.mobileGroup) || []).forEach((color) => fragment.appendChild(paintButton(color, active)));
+    grid.appendChild(fragment);
+    wrap.appendChild(grid);
+    wrap.scrollTop = scroll;
+    const on = chips.querySelector(".is-on");
+    if (on) chips.scrollLeft = on.offsetLeft - chips.clientWidth / 2 + on.offsetWidth / 2;
+    return;
+  }
   names.forEach((name) => {
     const details = document.createElement("details");
     details.className = "color-group";
@@ -977,6 +1068,8 @@ function paintButton(color, current) {
   const chip = document.createElement("span");
   chip.className = "chip";
   chip.style.background = color.hex;
+  const rgb = parseHex(color.hex);
+  if (rgb) button.style.setProperty("--on-chip", rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114 > 150 ? "#1c1917" : "#fffcf8");
   const text = document.createElement("span");
   text.className = "paint-label";
   const title = document.createElement("strong");
@@ -1061,6 +1154,7 @@ function chooseColor(hex, label) {
   renderSurfaces();
   updateSwatchSelection();
   redraw();
+  if (isMobile() && label) toast(label);
   setPickerFromHex(current.color);
 }
 
@@ -1228,7 +1322,8 @@ function tapWord() {
 function setTool(tool) {
   state.tool = tool;
   $("studio").dataset.tool = tool;
-  document.querySelectorAll("[data-tool]").forEach((button) => {
+  if (tool !== "select" && isMobile() && !state.editing) setEditing(true);
+  document.querySelectorAll("button[data-tool]").forEach((button) => {
     button.setAttribute("aria-pressed", button.dataset.tool === tool ? "true" : "false");
   });
   $("brush-cursor").hidden = tool !== "brush" && tool !== "eraser";
@@ -1358,10 +1453,17 @@ function startPinch() {
 }
 
 async function onPointerDown(event) {
+  // Listens on the whole stage (capture phase), so a second finger counts even if it lands beside
+  // the photo or on a floating button. A first touch on a button is left to the button.
   if (!state.sessionId) return;
+  if (event.target.closest("button")) {
+    if (!state.pointers.size || !isTouchLike(event)) return;
+    event.stopPropagation();
+    event.preventDefault();
+  }
   state.lastPointerType = event.pointerType;
   if (event.pointerType === "mouse" && event.button !== 0 && event.button !== 1) return;
-  view.setPointerCapture(event.pointerId);
+  $("stage").setPointerCapture(event.pointerId);
   state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
   if (state.pointers.size === 2 && isTouchLike(event)) {
     startPinch();
@@ -1388,7 +1490,12 @@ async function onPointerDown(event) {
   await tapAction(point, event.shiftKey);
 }
 
+function onPhoto(point) {
+  return point.x >= 0 && point.y >= 0 && point.x < state.width && point.y < state.height;
+}
+
 async function tapAction(point, shift) {
+  if (state.tool !== "select" && !onPhoto(point)) return;
   if (state.tool === "select") {
     const hit = hitSurface(point.x, point.y);
     if (hit) {
@@ -1728,13 +1835,15 @@ function setPanelWidth(px, save) {
   const limits = panelLimits();
   const width = Math.round(Math.min(limits.max, Math.max(limits.min, px)));
   document.documentElement.style.setProperty("--panel-width", `${width}px`);
-  if (save) localStorage.setItem("roomhue-panel-width", String(width));
+  $("panel-resize").setAttribute("aria-valuenow", String(width));
+  $("panel-resize").setAttribute("aria-valuemax", String(limits.max));
+  if (save && preferencesAllowed()) localStorage.setItem(PANEL_KEY, String(width));
   fit();
   if ($("fold-mix").open) sizePicker();
 }
 
 function bindPanel() {
-  const saved = Number(localStorage.getItem("roomhue-panel-width"));
+  const saved = preferencesAllowed() ? Number(localStorage.getItem(PANEL_KEY)) : 0;
   if (saved) setPanelWidth(saved, false);
   const handle = $("panel-resize");
   handle.addEventListener("pointerdown", (event) => {
@@ -1788,13 +1897,21 @@ function bind() {
   $("collection-btn").addEventListener("click", showCollection);
   $("empty-collection").addEventListener("click", showCollection);
   $("signout-btn").addEventListener("click", signOut);
-  $("signin-close").addEventListener("click", () => {
-    $("signin").hidden = true;
-    state.afterSignIn = null;
+  $("signin-btn").addEventListener("click", () => askSignIn(null));
+  $("delete-account-btn").addEventListener("click", deleteAccount);
+  $("collection-delete-account").addEventListener("click", deleteAccount);
+  $("agree").addEventListener("change", syncSignInButton);
+  $("consent-all").addEventListener("click", () => setConsent(true));
+  $("consent-essential").addEventListener("click", () => {
+    setConsent(false);
+    renderRecent();
   });
-  $("collection-close").addEventListener("click", () => {
-    $("collection").hidden = true;
+  document.querySelectorAll("[data-cookie-settings]").forEach((button) => button.addEventListener("click", showConsent));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && (!$("signin").hidden || !$("collection").hidden)) closeDialogs();
   });
+  $("signin-close").addEventListener("click", closeDialogs);
+  $("collection-close").addEventListener("click", closeDialogs);
   $("collection-upload").addEventListener("change", () => {
     const files = [...$("collection-upload").files];
     $("collection-upload").value = "";
@@ -1807,7 +1924,7 @@ function bind() {
     if (state.draft && state.draft.length >= 3) addWallFromDots();
     else setTool("dots");
   });
-  document.querySelectorAll("[data-tool]").forEach((button) => {
+  document.querySelectorAll("button[data-tool]").forEach((button) => {
     button.addEventListener("click", () => setTool(button.dataset.tool));
   });
   document.querySelectorAll("[data-sheen]").forEach((button) => {
@@ -1933,9 +2050,9 @@ function bind() {
     const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
     setZoom(state.zoom * factor, { x: event.clientX, y: event.clientY });
   }, { passive: false });
-  view.addEventListener("pointerdown", onPointerDown);
-  view.addEventListener("dblclick", (event) => {
-    if (state.lastPointerType !== "mouse") return;
+  $("stage").addEventListener("pointerdown", onPointerDown, true);
+  $("stage").addEventListener("dblclick", (event) => {
+    if (state.lastPointerType !== "mouse" || event.target.closest("button")) return;
     if (state.tool === "dots") {
       event.preventDefault();
       if (state.draft && state.draft.length >= 3) addWallFromDots();
@@ -1945,9 +2062,9 @@ function bind() {
       setZoom(state.zoom * (event.shiftKey ? 0.5 : 2), { x: event.clientX, y: event.clientY });
     }
   });
-  view.addEventListener("pointermove", onPointerMove);
-  view.addEventListener("pointerup", onPointerUp);
-  view.addEventListener("pointercancel", onPointerUp);
+  $("stage").addEventListener("pointermove", onPointerMove);
+  $("stage").addEventListener("pointerup", onPointerUp);
+  $("stage").addEventListener("pointercancel", onPointerUp);
   $("stage").addEventListener("pointerleave", () => {
     $("brush-cursor").style.opacity = "0";
   });
@@ -2047,7 +2164,7 @@ function isMobile() {
 
 function sheetStops() {
   const height = window.innerHeight;
-  return { peek: 116, half: Math.round(height * 0.5), full: Math.round(height * 0.84) };
+  return { peek: 112, half: Math.round(height * 0.54), full: Math.round(height * 0.86) };
 }
 
 function setSheet(name) {
@@ -2072,13 +2189,24 @@ function setSheetTab(id) {
   if (id === "fold-mix") requestAnimationFrame(sizePicker);
 }
 
+function setEditing(on) {
+  state.editing = on;
+  $("studio").classList.toggle("is-editing", on);
+  $("edit-toggle").textContent = on ? "Done" : "Edit";
+  $("edit-toggle").setAttribute("aria-pressed", String(on));
+  if (!on && state.tool !== "select") setTool("select");
+  scheduleFit();
+}
+
 function syncMobile() {
   const panel = document.querySelector(".panel");
   if (isMobile()) {
     setSheetTab(state.sheetTab);
     setSheet(state.sheet);
+    if (state.colors.length) renderSwatches();
   } else {
     panel.style.removeProperty("--sheet");
+    if (state.colors.length) renderSwatches();
     document.querySelectorAll(".panel > .fold").forEach((fold) => fold.classList.remove("is-tab"));
     toggleMenu(false);
   }
@@ -2090,11 +2218,17 @@ function toggleMenu(open) {
   const next = open == null ? !top.classList.contains("menu-open") : open;
   top.classList.toggle("menu-open", next);
   $("menu-btn").setAttribute("aria-expanded", String(next));
-  if (next && !state.user) renderGoogleButton($("account-google"), "signin");
 }
 
 function bindMobile() {
   $("m-open").addEventListener("click", () => $("file").click());
+  $("m-undo").addEventListener("click", undo);
+  $("m-redo").addEventListener("click", redo);
+  $("edit-toggle").addEventListener("click", () => setEditing(!state.editing));
+  $("brand-select").addEventListener("change", () => {
+    state.brand = $("brand-select").value;
+    loadColors(true);
+  });
   $("menu-btn").addEventListener("click", (event) => {
     event.stopPropagation();
     toggleMenu();
@@ -2177,6 +2311,7 @@ function bindMobile() {
   if (window.ResizeObserver) new ResizeObserver(() => scheduleFit()).observe($("stage"));
   mobileQuery.addEventListener("change", syncMobile);
   if (touchQuery.matches) $("empty-title").textContent = "Start with a photo of your room.";
+  if (isMobile()) $("search").placeholder = "Search name or code";
   syncMobile();
 }
 
@@ -2189,6 +2324,7 @@ async function boot() {
   if ($("fold-mix").open) sizePicker();
   setPickerFromHex("#C45C26");
   loadAccount();
+  if (!consent()) $("consent").hidden = false;
   await loadColors(true);
 }
 
@@ -2199,48 +2335,93 @@ async function loadAccount() {
     const body = await response.json();
     state.clientId = body.client_id || "";
     state.user = body.user || null;
+    state.legalVersion = body.legal_version || "";
   } catch {
     state.clientId = "";
   }
   renderAccount();
-  if (state.clientId) whenGoogleReady(setUpGoogle);
 }
 
-function whenGoogleReady(run) {
-  if (window.google?.accounts?.id) {
-    run();
-    return;
-  }
-  const script = document.querySelector('script[src*="accounts.google.com/gsi/client"]');
-  script?.addEventListener("load", run, { once: true });
-}
-
-function setUpGoogle() {
-  google.accounts.id.initialize({
-    client_id: state.clientId,
-    callback: onGoogleCredential,
-    auto_select: false,
-    cancel_on_tap_outside: true,
+function loadGoogle() {
+  // Google's script is only fetched after someone chooses to sign in and agrees to the terms.
+  if (state.googleReady) return state.googleReady;
+  state.googleReady = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = GOOGLE_SCRIPT;
+    script.async = true;
+    script.onload = () => {
+      google.accounts.id.initialize({
+        client_id: state.clientId,
+        callback: onGoogleCredential,
+        auto_select: false,
+        cancel_on_tap_outside: true,
+      });
+      resolve();
+    };
+    script.onerror = () => {
+      state.googleReady = null;
+      reject(new Error("Google sign-in couldn't load. Check your connection and try again."));
+    };
+    document.head.appendChild(script);
   });
-  renderGoogleButton($("account-google"), "signin");
+  return state.googleReady;
 }
 
 function renderGoogleButton(node, text) {
   if (!window.google?.accounts?.id || !state.clientId) return;
   node.innerHTML = "";
-  google.accounts.id.renderButton(node, { theme: "outline", size: "medium", shape: "pill", text });
+  google.accounts.id.renderButton(node, { theme: "outline", size: "large", shape: "pill", text });
+}
+
+async function syncSignInButton() {
+  const node = $("signin-button");
+  clearTimeout(askSignIn.timer);
+  $("signin-problem").hidden = true;
+  if (!$("agree").checked) {
+    node.innerHTML = '<p class="hint">Check the box above to continue with Google.</p>';
+    return;
+  }
+  node.innerHTML = '<p class="hint">Loading Google sign-in…</p>';
+  try {
+    await loadGoogle();
+  } catch (error) {
+    node.innerHTML = "";
+    $("signin-problem").textContent = error.message;
+    $("signin-problem").hidden = false;
+    return;
+  }
+  if (!$("agree").checked || $("signin").hidden) return;
+  renderGoogleButton(node, "continue_with");
+  askSignIn.timer = setTimeout(() => {
+    if ($("signin").hidden || node.querySelector("iframe")) return;
+    $("signin-problem").textContent = `Google's sign-in button didn't load here. Add ${window.location.origin} to the Authorized JavaScript origins of the Google client, then reload.`;
+    $("signin-problem").hidden = false;
+  }, 4000);
 }
 
 function renderAccount() {
   const user = state.user;
+  document.body.classList.toggle("signed-in", Boolean(user));
   $("account-user").hidden = !user;
-  $("account-google").hidden = Boolean(user) || !state.clientId;
+  $("signin-btn").hidden = Boolean(user) || !state.clientId;
   $("account-off").hidden = Boolean(user) || Boolean(state.clientId);
   if (user) {
-    $("account-name").textContent = user.name || user.email;
-    $("account-user").title = user.email || "";
-    $("account-avatar").hidden = !user.picture;
-    if (user.picture) $("account-avatar").src = user.picture;
+    $("account-name").textContent = user.name;
+    $("account-initial").textContent = (user.name || "?").trim().charAt(0).toUpperCase();
+  }
+}
+
+async function deleteAccount() {
+  if (!state.user) return;
+  if (!window.confirm("Delete your RoomRoller account and every saved room? This can't be undone.")) return;
+  try {
+    const response = await fetch("/api/account", { method: "DELETE" });
+    if (!response.ok) throw new Error(await readError(response));
+    window.google?.accounts?.id?.disableAutoSelect();
+    signedOut();
+    toast("Your account and saved rooms were deleted.");
+  } catch (error) {
+    toast(error.message);
   }
 }
 
@@ -2249,13 +2430,17 @@ async function onGoogleCredential(response) {
     const result = await fetch("/api/auth/google", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ credential: response.credential }),
+      body: JSON.stringify({
+        credential: response.credential,
+        accepted_terms: $("agree").checked,
+        terms_version: state.legalVersion,
+      }),
     });
     if (!result.ok) throw new Error(await readError(result));
     state.user = (await result.json()).user;
     renderAccount();
     $("signin").hidden = true;
-    toast(`Signed in as ${state.user.name || state.user.email}.`);
+    toast(`Signed in as ${state.user.name}.`);
     const next = state.afterSignIn;
     state.afterSignIn = null;
     if (next) next();
@@ -2281,7 +2466,6 @@ function signedOut() {
   state.collectionName = "";
   $("collection").hidden = true;
   renderAccount();
-  renderGoogleButton($("account-google"), "signin");
 }
 
 function askSignIn(next) {
@@ -2290,15 +2474,18 @@ function askSignIn(next) {
     return;
   }
   state.afterSignIn = next;
+  state.lastFocus = document.activeElement;
   $("signin").hidden = false;
-  $("signin-problem").hidden = true;
-  renderGoogleButton($("signin-button"), "signin_with");
-  clearTimeout(askSignIn.timer);
-  askSignIn.timer = setTimeout(() => {
-    if ($("signin").hidden || $("signin-button").querySelector("iframe")) return;
-    $("signin-problem").textContent = `Google's sign-in button didn't load here. Add ${window.location.origin} to the Authorized JavaScript origins of the Google client, then reload.`;
-    $("signin-problem").hidden = false;
-  }, 4000);
+  syncSignInButton();
+  $("agree").focus();
+}
+
+function closeDialogs() {
+  const open = !$("signin").hidden || !$("collection").hidden;
+  $("signin").hidden = true;
+  $("collection").hidden = true;
+  state.afterSignIn = null;
+  if (open && state.lastFocus && document.contains(state.lastFocus)) state.lastFocus.focus();
 }
 
 async function checkSignedIn(response, next) {
@@ -2376,7 +2563,9 @@ async function showCollection() {
     askSignIn(showCollection);
     return;
   }
+  state.lastFocus = document.activeElement;
   $("collection").hidden = false;
+  $("collection-close").focus();
   const list = $("collection-list");
   list.innerHTML = "";
   try {
@@ -2395,7 +2584,7 @@ async function showCollection() {
       const item = document.createElement("li");
       item.className = "collection-item";
       const image = document.createElement("img");
-      image.alt = "";
+      image.alt = `Preview of ${room.name}`;
       image.src = `/api/collection/${room.id}/thumb`;
       const text = document.createElement("div");
       const title = document.createElement("strong");

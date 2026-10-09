@@ -72,6 +72,10 @@ These are the next layers, in the order they earn their place. The studio is alr
 - Time-of-day lighting and white balance, so a north-facing room and a lamp-lit room do not share one exposure.
 - A phone camera path, and a way to send someone the before/after without handing over the project file.
 
+## Privacy and legal
+
+The Privacy Policy, Terms of Service, and Cookie Policy are at `/privacy`, `/terms`, and `/cookies` (`static/legal/`). Requests go to privacy@roomroller.com. Sign-in requires agreeing to the current version in `app/auth.py` (`LEGAL_VERSION`); bump it, and the dates on the pages, when either policy changes materially. Anyone signed in can delete their account and saved rooms from the menu, the Collection window, or the Privacy page. `docs/privacy-audit.md` lists what is stored, every third-party service and dependency, and what to re-check when something is added.
+
 ## Tests
 
 ```powershell

@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
@@ -22,7 +22,16 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app import auth
 from app.catalog import search as search_colors
-from app.collection import delete_room, import_rooms, list_rooms, load_room, save_room, thumb_bytes
+from app.collection import (
+    delete_account,
+    delete_room,
+    import_rooms,
+    list_rooms,
+    load_room,
+    record_consent,
+    save_room,
+    thumb_bytes,
+)
 from app.color_math import recolor_rgb
 from app.detect import Surface, detect_surfaces, magic_wand, prepare_image, surfaces_from_lines
 from app.sample_room import make_sample_room
@@ -85,6 +94,8 @@ class SavedSurface(BaseModel):
 
 class GoogleSignIn(BaseModel):
     credential: str = Field(min_length=1, max_length=8192)
+    accepted_terms: bool = False
+    terms_version: str = ""
 
 
 class SaveRoomRequest(BaseModel):
@@ -205,6 +216,24 @@ def index() -> HTMLResponse:
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
+LEGAL = STATIC / "legal"
+
+
+@app.get("/privacy")
+def privacy_page() -> FileResponse:
+    return FileResponse(LEGAL / "privacy.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/terms")
+def terms_page() -> FileResponse:
+    return FileResponse(LEGAL / "terms.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/cookies")
+def cookies_page() -> FileResponse:
+    return FileResponse(LEGAL / "cookies.html", headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/colors")
 def colors(brand: str = "", q: str = "", limit: int = 60, offset: int = 0) -> dict:
     return search_colors(brand, q, limit, offset)
@@ -216,14 +245,24 @@ def _saved_surfaces(body: SaveRoomRequest) -> list[dict]:
 
 @app.get("/api/auth/me")
 def auth_me(request: Request) -> dict:
-    return {"client_id": auth.client_id(), "user": auth.current_user(request)}
+    return {"client_id": auth.client_id(), "user": auth.current_user(request), "legal_version": auth.LEGAL_VERSION}
 
 
 @app.post("/api/auth/google")
 def auth_google(request: Request, body: GoogleSignIn) -> dict:
+    if not body.accepted_terms or body.terms_version != auth.LEGAL_VERSION:
+        raise HTTPException(status_code=400, detail="Agree to the Terms of Service and Privacy Policy to sign in.")
     user = auth.verify_google_token(body.credential)
+    record_consent(user["id"], auth.LEGAL_VERSION)
     request.session["user"] = user
     return {"user": user}
+
+
+@app.delete("/api/account")
+def account_delete(request: Request, user_id: str = Depends(auth.require_user)) -> dict:
+    removed = delete_account(user_id)
+    request.session.clear()
+    return {"ok": True, "removed": removed}
 
 
 @app.post("/api/auth/logout")

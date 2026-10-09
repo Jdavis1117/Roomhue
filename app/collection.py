@@ -153,6 +153,31 @@ def delete_room(user_id: str, room_id: str) -> None:
         files.delete(key)
 
 
+def record_consent(user_id: str, version: str) -> None:
+    """Keep proof of which Terms and Privacy Policy version the account agreed to, and when."""
+    key = _prefix(user_id) + "account.json"
+    files = store()
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        record = json.loads((files.read(key) or b"{}").decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        record = {}
+    if record.get("terms_version") == version:
+        return
+    record.update({"terms_version": version, "accepted_at": now})
+    record.setdefault("first_accepted_at", now)
+    files.write(key, json.dumps(record).encode("utf-8"))
+
+
+def delete_account(user_id: str) -> int:
+    """Remove every saved room and the consent record for this account. Returns the number of files removed."""
+    files = store()
+    keys = files.list(_prefix(user_id))
+    for key in keys:
+        files.delete(key)
+    return len(keys)
+
+
 def thumb_bytes(user_id: str, room_id: str) -> bytes:
     raw = store().read(_prefix(user_id, room_id) + "thumb.jpg")
     if raw is None:
