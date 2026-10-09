@@ -169,8 +169,40 @@ async function readError(response) {
   }
 }
 
-function setBusy(on) {
+const READING_STEPS = [
+  "Reading the room…",
+  "Finding the walls…",
+  "Mapping the corners…",
+  "Spotting furniture and windows…",
+  "Measuring the light…",
+  "Getting the paint ready…",
+];
+const OPENING_STEPS = ["Opening your room…", "Loading the walls…", "Laying the paint back on…"];
+
+function setBusy(on, steps = ["Working…"]) {
+  // Cycle through what's happening so a slow step never looks frozen.
+  clearInterval(setBusy.timer);
+  const text = $("busy-text");
   $("busy").hidden = !on;
+  if (!on) return;
+  let index = 0;
+  text.textContent = steps[0];
+  text.classList.remove("is-swapping");
+  // Screen readers hear the first message; the rest are visual reassurance.
+  text.setAttribute("aria-live", "off");
+  if (steps.length < 2) return;
+  setBusy.timer = setInterval(() => {
+    if (index >= steps.length - 1) {
+      clearInterval(setBusy.timer);
+      return;
+    }
+    text.classList.add("is-swapping");
+    setTimeout(() => {
+      index += 1;
+      text.textContent = steps[index];
+      text.classList.remove("is-swapping");
+    }, 180);
+  }, 1500);
 }
 
 function selected() {
@@ -2210,7 +2242,7 @@ async function sessionFetch(makeUrl, options) {
 }
 
 async function runWand(x, y, addToSelected) {
-  setBusy(true);
+  setBusy(true, ["Selecting…"]);
   try {
     const response = await sessionFetch((id) => `/api/sessions/${id}/wand`, {
       method: "POST",
@@ -2286,7 +2318,7 @@ async function openFile(file) {
     toast("Choose a photo.");
     return;
   }
-  setBusy(true);
+  setBusy(true, READING_STEPS);
   try {
     const form = new FormData();
     form.append("file", await shrinkPhoto(file));
@@ -2301,7 +2333,7 @@ async function openFile(file) {
 }
 
 async function openSample() {
-  setBusy(true);
+  setBusy(true, READING_STEPS);
   try {
     const response = await fetch("/api/sample", { method: "POST" });
     if (!response.ok) throw new Error(await readError(response));
@@ -3357,7 +3389,7 @@ function startRename(room, title, button) {
 }
 
 async function openSaved(roomId) {
-  setBusy(true);
+  setBusy(true, OPENING_STEPS);
   try {
     const response = await fetch(`/api/collection/${roomId}/open`, { method: "POST" });
     if (await checkSignedIn(response, showCollection)) return;

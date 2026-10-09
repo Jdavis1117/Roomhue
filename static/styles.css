@@ -223,11 +223,37 @@ canvas {
 .busy {
   position: absolute;
   inset: 0;
+  z-index: 4;
   display: grid;
   place-items: center;
   background: rgba(243, 239, 232, 0.72);
+}
+.busy-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 22px;
+  border-radius: 999px;
+  background: var(--panel);
+  box-shadow: 0 12px 34px rgba(40, 28, 16, 0.14);
   font-family: Palatino, "Palatino Linotype", Georgia, serif;
-  font-size: 1.4rem;
+  font-size: 1.25rem;
+}
+.busy-ring {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 3px solid var(--paper-deep);
+  border-top-color: var(--accent);
+  animation: busy-spin 0.9s linear infinite;
+  flex: 0 0 auto;
+}
+.busy-text { min-width: 15ch; transition: opacity 180ms ease, transform 180ms ease; }
+.busy-text.is-swapping { opacity: 0; transform: translateY(4px); }
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .busy-ring { animation-duration: 2.4s; }
+  .busy-text { transition: none; }
 }
 
 .panel {
@@ -1189,6 +1215,7 @@ body:not(.signed-in) .collection-foot { display: none; }
     max-width: calc(100vw - 16px);
   }
   .snack-action { min-height: 40px; }
+  .busy-card { font-size: 1.05rem; padding: 12px 18px; max-width: calc(100vw - 32px); }
   .toast {
     bottom: auto;
     top: calc(62px + env(safe-area-inset-top));
