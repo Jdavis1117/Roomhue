@@ -478,13 +478,18 @@ function feather(surface) {
   ctx.filter = "blur(1.4px)";
   ctx.drawImage(surface.maskCanvas, 0, 0);
   const pixels = ctx.getImageData(0, 0, state.width, state.height).data;
+  // Interior pixels stay opaque. The blur only feathers outside the mask,
+  // so the seam between two walls is not a soft mix back to the photo.
+  const hard = maskAlpha(surface.maskCanvas);
   const alpha = new Float32Array(state.width * state.height);
   let x0 = state.width;
   let y0 = state.height;
   let x1 = 0;
   let y1 = 0;
   for (let i = 0; i < alpha.length; i += 1) {
-    const value = pixels[i * 4 + 3] / 255;
+    const solid = hard[i * 4 + 3] >= 128;
+    const soft = pixels[i * 4 + 3] / 255;
+    const value = solid ? 1 : soft;
     alpha[i] = value < 0.04 ? 0 : value;
     if (alpha[i]) {
       const x = i % state.width;
@@ -514,7 +519,6 @@ function applySurface(data, surface, region) {
   if (x0 >= x1 || y0 >= y1) return;
   const med = surfaceMedian(surface);
   const shine = SHEEN_AMOUNT[surface.sheen] || 0;
-  const src = state.lab.rgb;
   for (let y = y0; y < y1; y += 1) for (let i = y * state.width + x0, end = y * state.width + x1; i < end; i += 1) {
     const coverage = alpha[i] * surface.coverage;
     if (coverage <= 0) continue;
@@ -533,9 +537,12 @@ function applySurface(data, surface, region) {
       b += (255 - b) * spec;
     }
     const p = i * 4;
-    data[p] = src[p] * (1 - coverage) + r * coverage;
-    data[p + 1] = src[p + 1] * (1 - coverage) + g * coverage;
-    data[p + 2] = src[p + 2] * (1 - coverage) + b * coverage;
+    // Blend over paint already placed by another surface. Blending each wall
+    // against the photo lets the original color show through the seam.
+    const keep = 1 - coverage;
+    data[p] = data[p] * keep + r * coverage;
+    data[p + 1] = data[p + 1] * keep + g * coverage;
+    data[p + 2] = data[p + 2] * keep + b * coverage;
     data[p + 3] = 255;
   }
 }

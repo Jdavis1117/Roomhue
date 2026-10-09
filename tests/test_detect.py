@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 
 import pytest
@@ -101,6 +102,38 @@ def test_wand_on_left_wall_stays_there():
     mask = magic_wand(room.bgr, x, y, tolerance=16)
     assert _recall(mask, room.labels["left"]) > 0.65
     assert _recall(mask, room.labels["back"]) < 0.15
+
+
+def _min_distance(source: np.ndarray, target: np.ndarray) -> float:
+    dist = cv2.distanceTransform(np.where(target > 0, 0, 255).astype(np.uint8), cv2.DIST_L2, 5)
+    near = source > 0
+    if not np.any(near):
+        return 999.0
+    return float(dist[near].min())
+
+
+def test_neighboring_walls_touch():
+    room = make_sample_room()
+    surfaces = detect_surfaces(room.bgr)
+    walls = sorted((surface for surface in surfaces if surface.kind == "wall"), key=lambda surface: surface.centroid[0])
+    assert len(walls) >= 3
+    for left, right in zip(walls, walls[1:]):
+        assert _min_distance(left.mask, right.mask) <= 1.5
+        overlap = int(((left.mask > 0) & (right.mask > 0)).sum())
+        assert overlap == 0
+
+    wall_mask = np.zeros(room.bgr.shape[:2], dtype=np.uint8)
+    for surface in walls:
+        wall_mask[surface.mask > 0] = 255
+    assert _recall(wall_mask, room.labels["window"]) < 0.05
+    assert _recall(wall_mask, room.labels["sofa"]) < 0.05
+
+
+def test_line_split_does_not_leave_a_gap():
+    image = np.full((200, 300, 3), 180, np.uint8)
+    surfaces = surfaces_from_lines(image, [(150, 0, 150, 199)])
+    assert len(surfaces) >= 2
+    assert _min_distance(surfaces[0].mask, surfaces[1].mask) <= 1.5
 
 
 def test_lines_split_when_they_stop_just_short_of_the_border():

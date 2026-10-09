@@ -91,12 +91,17 @@ def paint_lab(color: str, shade: float = 0.0) -> tuple[float, float, float]:
 
 
 def feather_alpha(mask: np.ndarray, coverage: float) -> np.ndarray:
-    """mask uint8 0..255 → float alpha 0..1, softened at the edges."""
+    """mask uint8 0..255 → float alpha 0..1, softened outside the mask.
+
+    Pixels the mask already owns stay fully covered. Softening those too
+    blends the seam between two walls back toward the photo.
+    """
     import cv2
 
     blurred = cv2.GaussianBlur(mask, (0, 0), 1.5)
     alpha = blurred.astype(np.float32) / 255.0
     alpha[alpha < 0.04] = 0
+    alpha[mask >= 128] = 1.0
     return np.clip(alpha * float(coverage), 0.0, 1.0)
 
 

@@ -40,6 +40,20 @@ def test_dark_paint_lowers_lightness():
     assert float(after_L.mean()) < float(before_L.mean()) - 8
 
 
+def test_abutting_masks_hide_the_original_at_the_seam():
+    rgb = np.full((40, 80, 3), (200, 180, 160), dtype=np.uint8)
+    left = np.zeros((40, 80), np.uint8)
+    right = np.zeros((40, 80), np.uint8)
+    left[:, :40] = 255
+    right[:, 40:] = 255
+    out = recolor_rgb(rgb, left, "#2244AA", coverage=1, sheen="matte")
+    out = recolor_rgb(out, right, "#AA4422", coverage=1, sheen="matte")
+    seam = out[:, 37:43].astype(int)
+    original = rgb[:, 37:43].astype(int)
+    diff = np.abs(seam - original).sum(axis=2)
+    assert int(diff.min()) > 40
+
+
 def test_paint_lab_accepts_shade():
     base, _, _ = paint_lab("#F3F0E8", 0)
     lighter, _, _ = paint_lab("#F3F0E8", 8)
