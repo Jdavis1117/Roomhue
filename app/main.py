@@ -16,13 +16,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
-from app import auth
+from app import auth, images
 from app.catalog import coordinates as coordinate_colors
 from app.catalog import search as search_colors
 from app.collection import (
@@ -33,7 +34,10 @@ from app.collection import (
     load_favorites,
     load_room,
     record_consent,
+    rename_room,
+    revoke_sessions,
     save_favorites,
+    session_epoch,
     save_room,
     thumb_bytes,
 )
@@ -45,7 +49,29 @@ from app.sample_room import make_sample_room
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
 MAX_BYTES = 25 * 1024 * 1024
-MAX_SESSIONS = 6
+# Largest request accepted at all: a 25 MB photo plus form overhead, or a saved room with its wall masks.
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
+# Open photos are kept in memory while people edit. Oldest-unused go first when this budget is full;
+# the browser re-sends its copy if one it needs was dropped.
+SESSION_BUDGET_BYTES = int(os.environ.get("ROOMHUE_SESSION_MB", "400")) * 1024 * 1024
+SESSION_IDLE_SECONDS = 2 * 60 * 60
+# Detection needs about 600 MB; running more than one at a time could exhaust a 2 GB server.
+_heavy = threading.BoundedSemaphore(max(1, int(os.environ.get("ROOMHUE_DETECT_SLOTS", "1"))))
+GOOGLE_SIGN_IN = "https://accounts.google.com/gsi/"
+CONTENT_SECURITY_POLICY = "; ".join(
+    [
+        "default-src 'self'",
+        f"script-src 'self' {GOOGLE_SIGN_IN}client",
+        f"style-src 'self' 'unsafe-inline' {GOOGLE_SIGN_IN}style",
+        "img-src 'self' data: blob:",
+        f"connect-src 'self' {GOOGLE_SIGN_IN}",
+        f"frame-src {GOOGLE_SIGN_IN}",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "object-src 'none'",
+    ]
+)
 
 auth.load_env_file()
 
@@ -59,6 +85,54 @@ app.add_middleware(
     https_only=bool(os.environ.get("REPLIT_DEPLOYMENT")),
 )
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+class LimitBody:
+    """Refuse oversized requests before they are read into memory, including ones sent without a length."""
+
+    def __init__(self, inner, limit: int) -> None:
+        self.inner = inner
+        self.limit = limit
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.inner(scope, receive, send)
+            return
+        declared = dict(scope.get("headers") or []).get(b"content-length")
+        if declared and declared.isdigit() and int(declared) > self.limit:
+            await JSONResponse({"detail": "That upload is too large."}, status_code=413)(scope, receive, send)
+            return
+        seen = 0
+
+        async def limited():
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > self.limit:
+                    raise HTTPException(status_code=413, detail="That upload is too large.")
+            return message
+
+        await self.inner(scope, limited, send)
+
+
+app.add_middleware(LimitBody, limit=MAX_REQUEST_BYTES)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    headers = response.headers
+    headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+    headers.setdefault("X-Frame-Options", "DENY")
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+    # Google's sign-in opens a popup that reports back to this page.
+    headers.setdefault("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
+    if request.headers.get("x-forwarded-proto", request.url.scheme) == "https":
+        headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 _sessions: dict[str, dict] = {}
 _lock = threading.Lock()
@@ -74,28 +148,31 @@ class LineRequest(BaseModel):
     segments: list[list[float]] = Field(min_length=1, max_length=200)
 
 
+MASK_FIELD = Field(max_length=4_000_000)
+
+
 class RenderSurface(BaseModel):
-    mask_png_base64: str
-    color: str
+    mask_png_base64: str = MASK_FIELD
+    color: str = Field(max_length=16)
     coverage: float = 0.92
     sheen: str = "eggshell"
     shade: float = 0
 
 
 class RenderRequest(BaseModel):
-    surfaces: list[RenderSurface] = Field(default_factory=list)
+    surfaces: list[RenderSurface] = Field(default_factory=list, max_length=40)
 
 
 class SavedSurface(BaseModel):
-    name: str
-    kind: str
-    color: str | None = None
-    color_label: str = ""
+    name: str = Field(max_length=80)
+    kind: str = Field(max_length=20)
+    color: str | None = Field(default=None, max_length=16)
+    color_label: str = Field(default="", max_length=200)
     sheen: str = "eggshell"
     coverage: float = 0.92
     shade: float = 0
     included: bool = True
-    mask_png_base64: str
+    mask_png_base64: str = MASK_FIELD
 
 
 class GoogleSignIn(BaseModel):
@@ -117,25 +194,31 @@ class FavoritesRequest(BaseModel):
 
 
 class SaveRoomRequest(BaseModel):
-    name: str = "Room"
-    surfaces: list[SavedSurface] = Field(default_factory=list)
+    name: str = Field(default="Room", max_length=200)
+    surfaces: list[SavedSurface] = Field(default_factory=list, max_length=40)
 
 
-def _evict_locked(now: float) -> None:
-    stale = [key for key, value in _sessions.items() if now - value["created"] > 60 * 60 * 2]
-    for key in stale:
+class RenameRoomRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+def _evict_locked(now: float, incoming: int) -> None:
+    for key in [key for key, value in _sessions.items() if now - value["used"] > SESSION_IDLE_SECONDS]:
         del _sessions[key]
-    if len(_sessions) <= MAX_SESSIONS:
-        return
-    for key, _value in sorted(_sessions.items(), key=lambda item: item[1]["created"])[: len(_sessions) - MAX_SESSIONS]:
+    total = sum(value["image"].nbytes for value in _sessions.values()) + incoming
+    for key, value in sorted(_sessions.items(), key=lambda item: item[1]["used"]):
+        if total <= SESSION_BUDGET_BYTES:
+            break
+        total -= value["image"].nbytes
         del _sessions[key]
 
 
 def _store(image: np.ndarray) -> str:
-    session_id = uuid.uuid4().hex[:12]
+    session_id = uuid.uuid4().hex
     with _lock:
-        _evict_locked(time.time())
-        _sessions[session_id] = {"image": image, "created": time.time()}
+        now = time.time()
+        _evict_locked(now, image.nbytes)
+        _sessions[session_id] = {"image": image, "used": now}
     return session_id
 
 
@@ -143,14 +226,27 @@ def _image(session_id: str) -> np.ndarray:
     with _lock:
         session = _sessions.get(session_id)
         if session is None:
-            raise HTTPException(status_code=404, detail="That photo is no longer loaded. Import it again.")
-        session["created"] = time.time()
+            # 410 tells the browser to send its copy of the photo again and retry.
+            raise HTTPException(status_code=410, detail="That photo is no longer loaded. Open it again.")
+        session["used"] = time.time()
         return session["image"]
+
+
+def _heavy_work(work, *args):
+    """Run decode-and-detect work one at a time, so memory stays bounded."""
+    if not _heavy.acquire(timeout=45):
+        raise HTTPException(status_code=503, detail="RoomRoller is busy right now. Try again in a moment.")
+    try:
+        return work(*args)
+    finally:
+        _heavy.release()
 
 
 def _decode_upload(data: bytes) -> np.ndarray:
     if len(data) > MAX_BYTES:
         raise HTTPException(status_code=413, detail="That photo is larger than 25 MB.")
+    width, height = images.image_size(data)
+    images.check_size(width, height)
     try:
         with Image.open(io.BytesIO(data)) as opened:
             image = ImageOps.exif_transpose(opened)
@@ -177,12 +273,9 @@ def _png_b64(image: np.ndarray) -> str:
 def _mask_from_b64(value: str, shape: tuple[int, int]) -> np.ndarray:
     try:
         raw = base64.b64decode(value, validate=True)
-        array = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
     except Exception as exc:
         raise HTTPException(status_code=400, detail="A surface mask was unreadable.") from exc
-    if array is None or array.shape[:2] != shape:
-        raise HTTPException(status_code=400, detail="A surface mask doesn't match this photo.")
-    return array
+    return images.decode(raw, cv2.IMREAD_GRAYSCALE, expect=shape)
 
 
 def _names(surfaces: list[Surface]) -> list[str]:
@@ -280,7 +373,7 @@ def auth_google(request: Request, body: GoogleSignIn) -> dict:
         raise HTTPException(status_code=400, detail="Agree to the Terms of Service and Privacy Policy to sign in.")
     user = auth.verify_google_token(body.credential)
     record_consent(user["id"], auth.LEGAL_VERSION)
-    request.session["user"] = user
+    request.session["user"] = {**user, "epoch": session_epoch(user["id"], fresh=True)}
     return {"user": user}
 
 
@@ -294,6 +387,9 @@ def account_delete(request: Request, user_id: str = Depends(auth.require_user)) 
 
 @app.post("/api/auth/logout")
 def auth_logout(request: Request) -> dict:
+    user = auth.current_user(request)
+    if user:
+        revoke_sessions(user["id"])
     request.session.clear()
     return {"ok": True}
 
@@ -311,7 +407,8 @@ async def share_create(
         raise HTTPException(status_code=400, detail="The share details couldn't be read.") from exc
     if not isinstance(details, dict):
         details = {}
-    record = shares.create_share(user_id, details.get("name", ""), details.get("colors"), await before.read(), await after.read())
+    before_bytes, after_bytes = await before.read(), await after.read()
+    record = await run_in_threadpool(shares.create_share, user_id, details.get("name", ""), details.get("colors"), before_bytes, after_bytes)
     return {"token": record["token"], "name": record["name"], "path": f"/s/{record['token']}"}
 
 
@@ -345,7 +442,8 @@ def share_image(token: str, which: str) -> Response:
     return Response(
         shares.share_image(token, which),
         media_type="image/jpeg",
-        headers={"X-Robots-Tag": "noindex", "Cache-Control": "public, max-age=3600"},
+        # Short-lived caching so a deleted link stops showing its photos within a minute.
+        headers={"X-Robots-Tag": "noindex", "Cache-Control": "public, max-age=60"},
     )
 
 
@@ -366,8 +464,15 @@ def collection_list(user_id: str = Depends(auth.require_user)) -> list[dict]:
 
 @app.post("/api/collection/import")
 async def collection_import(files: list[UploadFile] = File(...), user_id: str = Depends(auth.require_user)) -> dict:
+    if len(files) > 400:
+        raise HTTPException(status_code=413, detail="That's too many files at once. Upload fewer rooms at a time.")
     uploads = [(item.filename or "", await item.read()) for item in files]
-    return {"rooms": import_rooms(user_id, uploads)}
+    return {"rooms": await run_in_threadpool(_heavy_work, import_rooms, user_id, uploads)}
+
+
+@app.patch("/api/collection/{room_id}")
+def collection_rename(room_id: str, body: RenameRoomRequest, user_id: str = Depends(auth.require_user)) -> dict:
+    return rename_room(user_id, room_id, body.name)
 
 
 @app.post("/api/sessions/{session_id}/collection")
@@ -426,9 +531,22 @@ def collection_thumb(room_id: str, user_id: str = Depends(auth.require_user)) ->
 @app.post("/api/sessions")
 async def create_session(file: UploadFile = File(...)) -> dict:
     data = await file.read()
-    image = _decode_upload(data)
-    session_id = _store(image)
-    return _payload(session_id, image, detect_surfaces(image))
+
+    def work() -> dict:
+        image = _decode_upload(data)
+        surfaces = detect_surfaces(image)
+        return _payload(_store(image), image, surfaces)
+
+    # Off the event loop, so one person's photo doesn't stall everyone else's requests.
+    return await run_in_threadpool(_heavy_work, work)
+
+
+@app.post("/api/sessions/restore")
+async def restore_session(file: UploadFile = File(...)) -> dict:
+    """Load a photo the browser already has (no detection), when the server dropped its copy."""
+    data = await file.read()
+    image = await run_in_threadpool(_decode_upload, data)
+    return {"session_id": _store(image), "width": int(image.shape[1]), "height": int(image.shape[0])}
 
 
 SAMPLE_PHOTO = ROOT / "data" / "sample" / "living-room.jpg"
@@ -444,7 +562,7 @@ def _sample_room() -> tuple[np.ndarray, list[Surface]]:
 
 @app.post("/api/sample")
 def sample() -> dict:
-    image, surfaces = _sample_room()
+    image, surfaces = _sample_room() if _sample_room.cache_info().currsize else _heavy_work(_sample_room)
     image = image.copy()
     session_id = _store(image)
     return _payload(session_id, image, surfaces)
@@ -453,7 +571,7 @@ def sample() -> dict:
 @app.post("/api/sessions/{session_id}/detect")
 def detect_again(session_id: str) -> dict:
     image = _image(session_id)
-    surfaces = detect_surfaces(image)
+    surfaces = _heavy_work(detect_surfaces, image)
     names = _names(surfaces)
     return {
         "surfaces": [
@@ -507,6 +625,10 @@ def wand(session_id: str, body: WandRequest) -> dict:
 
 @app.post("/api/sessions/{session_id}/render")
 def render(session_id: str, body: RenderRequest) -> Response:
+    return _heavy_work(_render, session_id, body)
+
+
+def _render(session_id: str, body: RenderRequest) -> Response:
     image = _image(session_id)
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     layers = []

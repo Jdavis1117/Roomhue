@@ -1366,7 +1366,7 @@ function chooseColor(hex, label, color, fromPairs) {
   renderSurfaces();
   updateSwatchSelection();
   redraw();
-  if (isMobile() && label) toast(label);
+  offerAllWalls(current, label);
   setPickerFromHex(current.color);
   if (color && color.brandId !== "custom" && !fromPairs) loadPairs(color);
 }
@@ -1547,6 +1547,70 @@ function useComparison(color) {
   redraw();
   closeDialogs();
   toast(`Using ${color.name}.`);
+}
+
+function otherWalls(current) {
+  return state.surfaces.filter(
+    (surface) => surface.kind === "wall" && surface.included !== false && surface.id !== current.id && surface.color !== current.color,
+  );
+}
+
+function offerAllWalls(current, label) {
+  // Right after a wall gets a color, offer the same color for the rest of the walls.
+  const name = currentColorChoice(current).name;
+  if (current.kind === "wall" && otherWalls(current).length) {
+    showSnack(`${name} on ${current.name}`, "Paint all walls", applyToAllWalls);
+  } else if (isMobile() && label) {
+    toast(label);
+  }
+}
+
+function applyToAllWalls() {
+  const current = selected();
+  if (!current || !current.color) return;
+  pushUndo();
+  let count = 0;
+  state.surfaces.forEach((surface) => {
+    if (surface.kind !== "wall" || surface.included === false) return;
+    surface.color = current.color;
+    surface.colorLabel = current.colorLabel || "";
+    surface.sheen = current.sheen;
+    surface.coverage = current.coverage;
+    surface.shade = current.shade;
+    count += 1;
+  });
+  state.paintDirty = true;
+  renderSurfaces();
+  updateSwatchSelection();
+  redraw();
+  showSnack(`${currentColorChoice(current).name} on all ${count} walls`, "Undo", undo);
+}
+
+function showSnack(text, actionLabel, action) {
+  $("snack-text").textContent = text;
+  $("snack-action").textContent = actionLabel;
+  state.snackAction = action;
+  $("toast").classList.remove("show");
+  $("snack").hidden = false;
+  requestAnimationFrame(() => $("snack").classList.add("show"));
+  clearTimeout(showSnack.timer);
+  const hideLater = () => {
+    showSnack.timer = setTimeout(() => {
+      // Stay up while someone is about to press it.
+      if ($("snack").matches(":hover, :focus-within")) hideLater();
+      else hideSnack();
+    }, 6000);
+  };
+  hideLater();
+}
+
+function hideSnack() {
+  clearTimeout(showSnack.timer);
+  state.snackAction = null;
+  $("snack").classList.remove("show");
+  setTimeout(() => {
+    if (!$("snack").classList.contains("show")) $("snack").hidden = true;
+  }, 180);
 }
 
 async function loadPairs(color) {
@@ -2119,10 +2183,30 @@ function createCustomSurface() {
   return surface;
 }
 
+async function restoreSession() {
+  // The server keeps open photos in memory and may drop one (restart, or many people editing).
+  // The browser still has it, so send it back quietly.
+  const blob = await new Promise((resolve) => state.baseCanvas.toBlob(resolve, "image/png"));
+  const body = new FormData();
+  body.append("file", blob, "photo.png");
+  const response = await fetch("/api/sessions/restore", { method: "POST", body });
+  if (!response.ok) throw new Error(await readError(response));
+  state.sessionId = (await response.json()).session_id;
+}
+
+async function sessionFetch(makeUrl, options) {
+  let response = await fetch(makeUrl(state.sessionId), options);
+  if (response.status === 410 && state.baseCanvas) {
+    await restoreSession();
+    response = await fetch(makeUrl(state.sessionId), options);
+  }
+  return response;
+}
+
 async function runWand(x, y, addToSelected) {
   setBusy(true);
   try {
-    const response = await fetch(`/api/sessions/${state.sessionId}/wand`, {
+    const response = await sessionFetch((id) => `/api/sessions/${id}/wand`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ x, y, tolerance: state.tolerance }),
@@ -2427,22 +2511,11 @@ function bind() {
     updateSwatchSelection();
     redraw();
   });
-  $("apply-all").addEventListener("click", () => {
-    const current = selected();
-    if (!current || !current.color) return;
-    pushUndo();
-    state.surfaces.forEach((surface) => {
-      if (surface.kind !== "wall" || surface.included === false) return;
-      surface.color = current.color;
-      surface.colorLabel = current.colorLabel || "";
-      surface.sheen = current.sheen;
-      surface.coverage = current.coverage;
-      surface.shade = current.shade;
-    });
-    state.paintDirty = true;
-    renderSurfaces();
-    updateSwatchSelection();
-    redraw();
+  $("apply-all").addEventListener("click", applyToAllWalls);
+  $("snack-action").addEventListener("click", () => {
+    const action = state.snackAction;
+    hideSnack();
+    if (action) action();
   });
   $("search").addEventListener("input", () => {
     state.search = $("search").value;
@@ -2933,7 +3006,7 @@ async function signOut() {
   }
   window.google?.accounts?.id?.disableAutoSelect();
   signedOut();
-  toast("Signed out.");
+  toast("Signed out on all your devices.");
 }
 
 function signedOut() {
@@ -3004,11 +3077,10 @@ async function saveRoom() {
     mask_png_base64: canvasBase64(surface.maskCanvas),
   }));
   const creating = !state.collectionId;
-  const url = creating
-    ? `/api/sessions/${state.sessionId}/collection`
-    : `/api/collection/${state.collectionId}?session_id=${state.sessionId}`;
+  const url = (id) =>
+    creating ? `/api/sessions/${id}/collection` : `/api/collection/${state.collectionId}?session_id=${id}`;
   try {
-    const response = await fetch(url, {
+    const response = await sessionFetch(url, {
       method: creating ? "POST" : "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: name || "Room", surfaces }),
@@ -3205,18 +3277,76 @@ async function showCollection() {
       open.className = "text-btn";
       open.textContent = "Open";
       open.addEventListener("click", () => openSaved(room.id));
+      const rename = document.createElement("button");
+      rename.type = "button";
+      rename.className = "text-btn";
+      rename.textContent = "Rename";
+      rename.setAttribute("aria-label", `Rename ${room.name}`);
+      rename.addEventListener("click", () => startRename(room, title, rename));
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "text-btn";
       remove.textContent = "Remove";
       remove.addEventListener("click", () => removeSaved(room.id, room.name));
-      actions.append(open, remove);
+      actions.append(open, rename, remove);
       item.append(image, text, actions);
       list.appendChild(item);
     });
   } catch (error) {
     toast(error.message);
   }
+}
+
+function startRename(room, title, button) {
+  // Swap the name for a text box: Enter or leaving the box saves, Escape cancels.
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "rename-input";
+  input.value = room.name;
+  input.maxLength = 80;
+  input.setAttribute("aria-label", `New name for ${room.name}`);
+  title.replaceWith(input);
+  button.disabled = true;
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const name = input.value.trim();
+    if (save && name && name !== room.name) {
+      try {
+        const response = await fetch(`/api/collection/${room.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        if (await checkSignedIn(response, showCollection)) return;
+        if (!response.ok) throw new Error(await readError(response));
+        room.name = (await response.json()).name;
+        if (state.collectionId === room.id) state.collectionName = room.name;
+        toast(`Renamed to ${room.name}.`);
+      } catch (error) {
+        toast(error.message);
+      }
+    }
+    title.textContent = room.name;
+    input.replaceWith(title);
+    button.disabled = false;
+    button.setAttribute("aria-label", `Rename ${room.name}`);
+    button.focus();
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
 }
 
 async function openSaved(roomId) {

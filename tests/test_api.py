@@ -1,5 +1,7 @@
 import base64
 import json
+import threading
+import time
 
 import cv2
 import numpy as np
@@ -105,6 +107,7 @@ def signed_in(tmp_path, monkeypatch):
     test_store = DiskStore(tmp_path)
     for module in ("app.collection", "app.shares"):
         monkeypatch.setattr(f"{module}.store", lambda: test_store)
+    monkeypatch.setattr("app.collection._epochs", {})
 
     def sign_in(user_id="user-1"):
         monkeypatch.setattr(
@@ -413,3 +416,162 @@ def test_deleting_account_removes_shared_links(signed_in):
     token = _share(owner).json()["token"]
     owner.delete("/api/account")
     assert TestClient(app).get(f"/s/{token}").status_code == 404
+
+
+
+def _bomb_png(side=9000):
+    """A uniform image: tiny on disk, huge in memory."""
+    row = np.full((1, side, 3), 200, np.uint8)
+    ok, buf = cv2.imencode(".png", np.repeat(row, side, axis=0), [cv2.IMWRITE_PNG_COMPRESSION, 9])
+    return buf.tobytes()
+
+
+def test_decompression_bombs_are_refused_before_decoding(signed_in):
+    bomb = _bomb_png()
+    assert len(bomb) < 400_000
+    upload = client.post("/api/sessions", files={"file": ("bomb.png", bomb, "image/png")})
+    assert upload.status_code == 413, upload.text
+    restore = client.post("/api/sessions/restore", files={"file": ("bomb.png", bomb, "image/png")})
+    assert restore.status_code == 413
+
+    session_id = _session(client)
+    mask = base64.b64encode(bomb).decode("ascii")
+    render = client.post(f"/api/sessions/{session_id}/render", json={"surfaces": [{"mask_png_base64": mask, "color": "#336699"}]})
+    assert render.status_code in (400, 413), render.text
+
+    browser = signed_in()
+    payload = _room_payload()
+    payload["surfaces"][0]["mask_png_base64"] = mask
+    assert browser.post(f"/api/sessions/{_session(browser)}/collection", json=payload).status_code in (400, 413)
+    shared = browser.post(
+        "/api/shares",
+        files={"before": ("b.png", bomb, "image/png"), "after": ("a.png", bomb, "image/png")},
+        data={"meta": "{}"},
+    )
+    assert shared.status_code == 413
+    meta = {"id": "0ee9bea3eb40", "name": "Bomb", "surfaces": []}
+    imported = browser.post(
+        "/api/collection/import",
+        files=[("files", ("r/room.json", json.dumps(meta).encode(), "application/json")), ("files", ("r/photo.png", bomb, "image/png"))],
+    )
+    assert imported.status_code == 413
+
+
+def test_oversized_requests_are_refused():
+    big = b"x" * (33 * 1024 * 1024)
+    response = client.post("/api/sessions", files={"file": ("big.jpg", big, "image/jpeg")})
+    assert response.status_code == 413
+
+    def chunks():
+        for _ in range(40):
+            yield b"y" * (1024 * 1024)
+
+    # Streamed without a length, as a photo upload; the limit has to catch it while reading.
+    streamed = client.post("/api/sessions/restore", content=chunks(), headers={"content-type": "multipart/form-data; boundary=xyz"})
+    assert streamed.status_code == 413
+
+
+def test_too_many_walls_or_huge_masks_are_refused(signed_in):
+    session_id = _session(client)
+    surface = {"mask_png_base64": "A" * 10, "color": "#123456"}
+    assert client.post(f"/api/sessions/{session_id}/render", json={"surfaces": [surface] * 41}).status_code == 422
+    huge = {"mask_png_base64": "A" * 4_000_004, "color": "#123456"}
+    assert client.post(f"/api/sessions/{session_id}/render", json={"surfaces": [huge]}).status_code == 422
+
+
+def test_a_slow_photo_does_not_freeze_other_requests(monkeypatch):
+    def slow(image):
+        time.sleep(1.5)
+        return []
+
+    monkeypatch.setattr("app.main.detect_surfaces", slow)
+    image = np.full((80, 120, 3), 180, np.uint8)
+    photo = cv2.imencode(".png", image)[1].tobytes()
+    worker = threading.Thread(target=lambda: client.post("/api/sessions", files={"file": ("room.png", photo, "image/png")}))
+    worker.start()
+    time.sleep(0.2)
+    started = time.perf_counter()
+    assert client.get("/api/auth/me").status_code == 200
+    waited = time.perf_counter() - started
+    worker.join()
+    assert waited < 0.8, f"another request waited {waited:.2f}s behind the upload"
+
+
+def test_dropped_photos_can_be_restored(monkeypatch):
+    image = np.full((80, 120, 3), 180, np.uint8)
+    photo = cv2.imencode(".png", image)[1].tobytes()
+    monkeypatch.setattr("app.main.SESSION_BUDGET_BYTES", image.nbytes * 2)
+    first = _session(client)
+    second = _session(client)
+    assert client.post(f"/api/sessions/{first}/wand", json={"x": 10, "y": 10}).status_code == 200
+    _session(client)  # pushes out the least recently used one, which is now `second`
+    assert client.post(f"/api/sessions/{second}/wand", json={"x": 10, "y": 10}).status_code == 410
+    assert client.post(f"/api/sessions/{first}/wand", json={"x": 10, "y": 10}).status_code == 200
+    restored = client.post("/api/sessions/restore", files={"file": ("photo.png", photo, "image/png")})
+    assert restored.status_code == 200
+    body = restored.json()
+    assert (body["width"], body["height"]) == (120, 80)
+    assert client.post(f"/api/sessions/{body['session_id']}/wand", json={"x": 10, "y": 10}).status_code == 200
+
+
+def test_security_headers_are_sent(signed_in):
+    for path in ("/", "/privacy", "/api/colors"):
+        headers = client.get(path).headers
+        assert "frame-ancestors 'none'" in headers["content-security-policy"]
+        assert "https://accounts.google.com/gsi/client" in headers["content-security-policy"]
+        assert headers["x-frame-options"] == "DENY"
+        assert headers["x-content-type-options"] == "nosniff"
+        assert headers["referrer-policy"] == "strict-origin-when-cross-origin"
+    assert "strict-transport-security" in client.get("/", headers={"x-forwarded-proto": "https"}).headers
+    browser = signed_in()
+    token = _share(browser).json()["token"]
+    assert TestClient(app).get(f"/s/{token}/after.jpg").headers["cache-control"] == "public, max-age=60"
+
+
+def test_signing_out_revokes_copied_cookies(signed_in):
+    browser = signed_in("user-1")
+    stolen = TestClient(app)
+    stolen.cookies.update(browser.cookies)
+    assert stolen.get("/api/collection").status_code == 200
+    browser.post("/api/auth/logout")
+    assert stolen.get("/api/collection").status_code == 401
+    assert signed_in("user-1").get("/api/collection").status_code == 200
+
+
+def test_deleting_the_account_revokes_copied_cookies(signed_in):
+    browser = signed_in("user-1")
+    stolen = TestClient(app)
+    stolen.cookies.update(browser.cookies)
+    browser.delete("/api/account")
+    assert stolen.get("/api/collection").status_code == 401
+    assert stolen.put("/api/favorites", json={"favorites": [FAVORITE]}).status_code == 401
+
+
+def test_storage_errors_show_a_generic_message():
+    from fastapi import HTTPException as Raised
+
+    from app.storage import UNAVAILABLE, _reported
+
+    @_reported
+    def broken():
+        raise ConnectionError("HTTPConnectionPool(host='127.0.0.1', port=1106)")
+
+    try:
+        broken()
+    except Raised as exc:
+        assert exc.status_code == 503 and exc.detail == UNAVAILABLE and "127.0.0.1" not in exc.detail
+    else:
+        raise AssertionError("expected a 503")
+
+
+def test_rooms_can_be_renamed(signed_in):
+    browser = signed_in("user-1")
+    room_id = browser.post(f"/api/sessions/{_session(browser)}/collection", json=_room_payload()).json()["id"]
+    renamed = browser.patch(f"/api/collection/{room_id}", json={"name": "  Upstairs   hall  "})
+    assert renamed.status_code == 200 and renamed.json()["name"] == "Upstairs hall"
+    assert browser.get("/api/collection").json()[0]["name"] == "Upstairs hall"
+    assert browser.post(f"/api/collection/{room_id}/open").json()["name"] == "Upstairs hall"
+    assert signed_in("user-2").patch(f"/api/collection/{room_id}", json={"name": "Mine now"}).status_code == 404
+    assert browser.patch(f"/api/collection/{room_id}", json={"name": ""}).status_code == 422
+    assert browser.patch(f"/api/collection/{room_id}", json={"name": "x" * 201}).status_code == 422
+    assert TestClient(app).patch(f"/api/collection/{room_id}", json={"name": "Nope"}).status_code == 401

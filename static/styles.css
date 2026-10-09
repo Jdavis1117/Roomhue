@@ -543,6 +543,37 @@ kbd {
   transition: opacity 160ms ease, transform 160ms ease;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.snack {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 24px);
+  padding: 6px 6px 6px 16px;
+  background: var(--ink);
+  color: #f7f3ee;
+  border-radius: 999px;
+  box-shadow: 0 10px 30px rgba(28, 25, 23, 0.25);
+  transform: translateX(-50%) translateY(12px);
+  opacity: 0;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.snack.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.snack-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.9rem; min-width: 0; }
+.snack-action {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: #f7f3ee;
+  color: var(--ink);
+  font-weight: 650;
+}
+.snack-action:focus-visible { outline: 2px solid #f7f3ee; outline-offset: 2px; }
 
 .collection {
   position: fixed;
@@ -578,6 +609,15 @@ kbd {
   background: var(--paper-deep);
 }
 .collection-item small { color: var(--muted); display: block; font-size: 0.75rem; }
+.rename-input {
+  width: 100%;
+  font: inherit;
+  font-weight: 650;
+  padding: 4px 8px;
+  border: 1px solid var(--focus);
+  border-radius: 8px;
+  background: var(--panel);
+}
 .collection-item button { margin-right: 4px; }
 .collection-empty { color: var(--muted); margin: 12px 0 0; }
 
@@ -940,6 +980,7 @@ body:not(.signed-in) .collection-foot { display: none; }
   .compare-overlay .compare-card { height: 100dvh; max-height: 100dvh; border-radius: 0; padding-top: calc(14px + env(safe-area-inset-top)); }
   .compare-grid { grid-template-columns: 1fr; }
   .share-link input { font-size: 16px; }
+  .rename-input { font-size: 16px; }
   .compare-pick { flex-wrap: nowrap; overflow-x: auto; margin: 0 -18px 12px; padding: 0 18px 2px; }
   .studio:not(.is-editing) .toolbar,
   .studio:not(.is-editing) .status,
@@ -1126,6 +1167,13 @@ body:not(.signed-in) .collection-foot { display: none; }
   .collection-item button { flex: 1; min-height: 40px; margin: 0; }
   .text-btn { min-height: 40px; }
 
+  .snack {
+    bottom: auto;
+    top: calc(62px + env(safe-area-inset-top));
+    width: max-content;
+    max-width: calc(100vw - 16px);
+  }
+  .snack-action { min-height: 40px; }
   .toast {
     bottom: auto;
     top: calc(62px + env(safe-area-inset-top));

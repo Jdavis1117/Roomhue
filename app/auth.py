@@ -70,6 +70,12 @@ def current_user(request: Request) -> dict | None:
     user = request.session.get("user")
     if not isinstance(user, dict) or not user.get("id"):
         return None
+    from app.collection import session_epoch
+
+    # Signing out or deleting the account bumps the epoch, so copied or stolen cookies stop working.
+    if "epoch" not in user or user["epoch"] != session_epoch(str(user["id"])):
+        request.session.clear()
+        return None
     return {"id": str(user["id"]), "name": str(user.get("name") or "You")}
 
 

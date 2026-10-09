@@ -15,9 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
-import numpy as np
 from fastapi import HTTPException
 
+from app import images
 from app.storage import store
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,9 +41,7 @@ def _clean_jpeg(data: bytes) -> tuple[bytes, int, int]:
     """Decode and re-encode, which also drops any embedded metadata."""
     if not data or len(data) > MAX_BYTES:
         raise HTTPException(status_code=413, detail="That image is too large to share.")
-    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(status_code=400, detail="That image couldn't be read.")
+    image = images.decode(data, cv2.IMREAD_COLOR)
     height, width = image.shape[:2]
     if max(height, width) > MAX_EDGE:
         scale = MAX_EDGE / max(height, width)

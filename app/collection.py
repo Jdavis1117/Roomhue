@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -13,6 +14,7 @@ import cv2
 import numpy as np
 from fastapi import HTTPException
 
+from app import images
 from app.storage import store
 
 _ID = re.compile(r"^[a-f0-9]{12}$")
@@ -98,10 +100,11 @@ def save_room(user_id: str, room_id: str, name: str, image: np.ndarray, surfaces
     height, width = image.shape[:2]
     masks = []
     for surface in surfaces:
-        raw = base64.b64decode(surface["mask_png_base64"], validate=True)
-        mask = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
-        if mask is None or mask.shape[0] != height or mask.shape[1] != width:
-            raise HTTPException(status_code=400, detail="A wall mask doesn't match this photo.")
+        try:
+            raw = base64.b64decode(surface["mask_png_base64"], validate=True)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="A wall mask was unreadable.") from exc
+        images.decode(raw, cv2.IMREAD_UNCHANGED, expect=(height, width))
         masks.append(raw)
     stored = [_surface_record(surface, index) for index, surface in enumerate(surfaces)]
     saved_at = datetime.now(timezone.utc).isoformat()
@@ -146,6 +149,13 @@ def load_room(user_id: str, room_id: str) -> tuple[np.ndarray, dict]:
     return image, meta
 
 
+def rename_room(user_id: str, room_id: str, name: str) -> dict:
+    meta = _meta(user_id, room_id)
+    meta["name"] = _clean_name(name)
+    store().write(_prefix(user_id, room_id) + "room.json", json.dumps(meta).encode("utf-8"))
+    return {"id": room_id, "name": meta["name"], "saved_at": meta["saved_at"]}
+
+
 def delete_room(user_id: str, room_id: str) -> None:
     _meta(user_id, room_id)
     files = store()
@@ -183,6 +193,45 @@ def save_favorites(user_id: str, favorites: list[dict]) -> list[dict]:
     return kept
 
 
+_epochs: dict[str, tuple[int | None, float]] = {}
+_EPOCH_SECONDS = 30.0
+
+
+def _account(user_id: str) -> dict | None:
+    raw = store().read(_prefix(user_id) + "account.json")
+    if raw is None:
+        return None
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def session_epoch(user_id: str, fresh: bool = False) -> int | None:
+    """Which sign-ins are still valid. A cookie from an older epoch, or for a deleted account (None), is refused.
+
+    Cached briefly so ordinary requests don't each read storage.
+    """
+    cached = _epochs.get(user_id)
+    if cached and not fresh and time.time() - cached[1] < _EPOCH_SECONDS:
+        return cached[0]
+    record = _account(user_id)
+    epoch = None if record is None else int(record.get("session_epoch", 0))
+    _epochs[user_id] = (epoch, time.time())
+    return epoch
+
+
+def revoke_sessions(user_id: str) -> None:
+    """Sign this account out everywhere: every existing cookie stops working."""
+    record = _account(user_id)
+    if record is None:
+        return
+    record["session_epoch"] = int(record.get("session_epoch", 0)) + 1
+    store().write(_prefix(user_id) + "account.json", json.dumps(record).encode("utf-8"))
+    _epochs[user_id] = (record["session_epoch"], time.time())
+
+
 def record_consent(user_id: str, version: str) -> None:
     """Keep proof of which Terms and Privacy Policy version the account agreed to, and when."""
     key = _prefix(user_id) + "account.json"
@@ -195,6 +244,7 @@ def record_consent(user_id: str, version: str) -> None:
     if record.get("terms_version") == version:
         return
     record.update({"terms_version": version, "accepted_at": now})
+    record.setdefault("session_epoch", 0)
     record.setdefault("first_accepted_at", now)
     files.write(key, json.dumps(record).encode("utf-8"))
 
@@ -205,6 +255,7 @@ def delete_account(user_id: str) -> int:
     keys = files.list(_prefix(user_id))
     for key in keys:
         files.delete(key)
+    _epochs[user_id] = (None, time.time())
     return len(keys)
 
 
@@ -237,9 +288,7 @@ def _store_imported(user_id: str, files: dict[str, bytes]) -> dict:
         meta = json.loads(files["room.json"].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail="That room.json could not be read.") from exc
-    image = cv2.imdecode(np.frombuffer(files["photo.png"], dtype=np.uint8), cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(status_code=400, detail="That saved photo could not be read.")
+    image = images.decode(files["photo.png"], cv2.IMREAD_COLOR)
     height, width = image.shape[:2]
     surfaces = meta.get("surfaces")
     if not isinstance(surfaces, list):
@@ -250,9 +299,7 @@ def _store_imported(user_id: str, files: dict[str, bytes]) -> dict:
         raw = files.get(mask_name)
         if raw is None or not _ROOM_FILE.fullmatch(mask_name):
             raise HTTPException(status_code=400, detail="A wall mask is missing from that saved room.")
-        mask = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
-        if mask is None or mask.shape[0] != height or mask.shape[1] != width:
-            raise HTTPException(status_code=400, detail="A wall mask doesn't match this photo.")
+        images.decode(raw, cv2.IMREAD_UNCHANGED, expect=(height, width))
         stored.append(_surface_record(surface, index))
         masks.append(raw)
 

@@ -17,6 +17,8 @@ from pathlib import Path
 from fastapi import HTTPException
 
 log = logging.getLogger("roomhue.storage")
+# The full error goes to the server log; people see only this.
+UNAVAILABLE = "Saved rooms are temporarily unavailable. Try again in a minute."
 ROOT = Path(__file__).resolve().parent.parent
 DISK_ROOT = ROOT / "data" / "collection"
 
@@ -58,10 +60,7 @@ def _reported(method):
             raise
         except Exception as exc:
             log.exception("Object Storage %s failed", method.__name__)
-            raise HTTPException(
-                status_code=503,
-                detail=f"Saved rooms storage isn't reachable ({type(exc).__name__}: {exc}).",
-            ) from exc
+            raise HTTPException(status_code=503, detail=UNAVAILABLE) from exc
 
     return run
 
@@ -101,5 +100,5 @@ def store() -> DiskStore | ReplitStore:
             return ReplitStore()
         except Exception as exc:
             log.exception("Object Storage could not start")
-            raise HTTPException(status_code=503, detail=f"Saved rooms storage isn't reachable ({type(exc).__name__}: {exc}).") from exc
+            raise HTTPException(status_code=503, detail=UNAVAILABLE) from exc
     return DiskStore(DISK_ROOT)
