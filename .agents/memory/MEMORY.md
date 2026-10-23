@@ -1,0 +1,1 @@
+- [Publishing package installs](publishing-package-installs.md) — Replit's pip wrapper can enable user installs even when the publishing interpreter disables user sites.
